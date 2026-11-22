@@ -196,7 +196,7 @@ services:
     network_mode: "service:velocity"
     depends_on: [velocity]
     environment:
-      - SECRET_KEY=${PLAYIT_SECRET_KEY}
+      - SECRET_KEY=${PLAYIT_SECRET_KEY:?set in .env}
 
 networks:
   # Proxy <-> backends. Not `internal`, because the containers need outbound

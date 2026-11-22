@@ -56,11 +56,57 @@ lp group default permission set griefprevention.unlockdrops true server=survival
 lp group default permission set griefprevention.ignore true server=survival
 
 # Creative: one plot via /plot auto (or /plot claim), build in own plot.
-lp group default permission set plots.permpack.basic true server=creative
+# PlotSquared's `plots.permpack.basic` minus plots.download / plots.save / plots.buy /
+# plots.merge*, listed explicitly instead of negated (see the note under builder).
 lp group default permission set plots.plot.1 true server=creative
+lp group default permission set plots.use true server=creative
+lp group default permission set plots.info true server=creative
+lp group default permission set plots.claim true server=creative
+lp group default permission set plots.auto true server=creative
+lp group default permission set plots.home true server=creative
+lp group default permission set plots.clear true server=creative
+lp group default permission set plots.delete true server=creative
+lp group default permission set plots.music true server=creative
+lp group default permission set plots.list true server=creative
+lp group default permission set plots.list.mine true server=creative
+lp group default permission set plots.list.shared true server=creative
+lp group default permission set plots.list.world true server=creative
+lp group default permission set plots.list.all true server=creative
+lp group default permission set plots.visit true server=creative
+lp group default permission set plots.visit.owned true server=creative
+lp group default permission set plots.visit.shared true server=creative
 lp group default permission set plots.visit.other true server=creative
-lp group default permission set plots.download false server=creative
-lp group default permission set plots.save false server=creative
+lp group default permission set plots.set true server=creative
+lp group default permission set plots.set.flag true server=creative
+lp group default permission set plots.set.biome true server=creative
+lp group default permission set plots.set.home true server=creative
+lp group default permission set plots.set.description true server=creative
+lp group default permission set plots.description true server=creative
+lp group default permission set plots.flag true server=creative
+lp group default permission set plots.flag.add true server=creative
+lp group default permission set plots.flag.remove true server=creative
+lp group default permission set plots.flag.list true server=creative
+lp group default permission set plots.flag.info true server=creative
+lp group default permission set plots.chat true server=creative
+lp group default permission set plots.confirm true server=creative
+lp group default permission set plots.toggle true server=creative
+lp group default permission set plots.toggle.titles true server=creative
+lp group default permission set plots.toggle.chat true server=creative
+lp group default permission set plots.toggle.time true server=creative
+lp group default permission set plots.alias true server=creative
+lp group default permission set plots.alias.set true server=creative
+lp group default permission set plots.alias.remove true server=creative
+lp group default permission set plots.denied true server=creative
+lp group default permission set plots.add true server=creative
+lp group default permission set plots.trust true server=creative
+lp group default permission set plots.deny true server=creative
+lp group default permission set plots.remove true server=creative
+lp group default permission set plots.untrust true server=creative
+lp group default permission set plots.undeny true server=creative
+lp group default permission set plots.kick true server=creative
+lp group default permission set plots.done true server=creative
+lp group default permission set plots.continue true server=creative
+lp group default permission set plots.middle true server=creative
 lp group default permission set essentials.tpa true server=creative
 lp group default permission set essentials.tpaccept true server=creative
 lp group default permission set essentials.tpdeny true server=creative
@@ -99,13 +145,17 @@ lp group builder parent add default
 # Higher FAWE limits everywhere on creative (FAWE `limits.builder`).
 lp group builder permission set fawe.limit.builder true server=creative
 # Build world: build anywhere (also a member of the WorldGuard __global__ region
-# there via g:builder, see setup.sh), full WorldEdit/FAWE with no region mask,
-# and FastAsyncVoxelSniper terrain tools.
+# there via g:builder, see setup.sh), FAWE with no region mask, and
+# FastAsyncVoxelSniper terrain tools.
+# WorldEdit commands come from FAWE's own `fawe.permpack.basic` (selections,
+# region ops, generation, brushes, tools, clipboard, schematics, history), NOT
+# `worldedit.*`, so admin-only nodes (worldedit.reload,
+# worldedit.limit.unrestricted, ...) are simply not granted. Never add explicit
+# `false` nodes to builder/default: an exact `false` beats a `*` wildcard, so a
+# user in both admin and builder would lose those permissions.
 lp group builder permission set worldguard.region.bypass.build true server=creative world=build
 lp group builder permission set fawe.bypass.regions true server=creative world=build
-lp group builder permission set worldedit.* true server=creative world=build
-lp group builder permission set worldedit.reload false server=creative
-lp group builder permission set worldedit.limit.unrestricted false server=creative
+lp group builder permission set fawe.permpack.basic true server=creative world=build
 lp group builder permission set voxelsniper.sniper true server=creative world=build
 lp group builder permission set voxelsniper.brush.* true server=creative world=build
 # Creative utilities.

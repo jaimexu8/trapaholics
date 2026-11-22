@@ -74,9 +74,18 @@ if (( DO_WORLD )); then
     grep -q 'passthrough: deny' "$regions" 2>/dev/null && break
     sleep 3
   done
+  [[ -r "$regions" ]] || die "cannot read $regions (run from the repo root on the host)"
   echo "--- $regions (__global__):"
-  sed -n '/__global__:/,/priority:/p' "$regions" 2>/dev/null \
-    || echo "(not readable from here; check with: rg info -w build __global__)"
+  global="$(sed -n '/__global__:/,/priority:/p' "$regions")"
+  echo "$global"
+  grep -q 'passthrough: deny' <<<"$global" \
+    || die "build world __global__ is missing 'passthrough: deny'"
+  members="$(sed -n '/members:/,/flags:/p' <<<"$global" | sed -n 's/.*groups: *\[\(.*\)\].*/\1/p' | tr -d ' ')"
+  for g in builder admin; do
+    [[ ",$members," == *",$g,"* ]] \
+      || die "build world __global__ is missing member group '$g' (members: '${members:-none}')"
+  done
+  echo "OK: build world __global__ has passthrough deny and member groups builder, admin"
 fi
 
 log "Waiting for LuckPerms to finish writing"
