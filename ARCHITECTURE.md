@@ -6,6 +6,11 @@
 > **Phase 1:** players connect through **playit.gg**.
 > **Phase 2:** players connect at `trapaholics.net` through a self-hosted cloud
 > reverse proxy (frp on a new Oracle Cloud instance). See §3.1.
+>
+> **Location:** `~/mc` on the server (`/home/jt/mc`); git remote
+> `https://github.com/jaimexu8/trapaholics.git`. On 2026-11-22 the old NeoForge
+> `~/mc` directory was deleted and `~/prepucio` was renamed to `~/mc`. Mentions
+> below of "old `mc/`" or "`prepucio/`" refer to those directories before the rename.
 
 ---
 
@@ -51,7 +56,7 @@
 | No working cloud instance yet (the old Oracle instance `164.152.19.87` is gone) | **Phase 1 uses playit.gg** as the tunnel. Phase 2 switches to frp on a newly provisioned Oracle Cloud instance with a new IP. |
 | Domain `trapaholics.net` must be used (owner controls its DNS) | In Phase 2, DNS points at the cloud instance, not the home IP. |
 | Single physical host: **16 GB RAM, Intel Xeon E3-1220 (4 cores / 4 threads, 3.1 GHz, 2011-era)** | Proxy, both game servers and the database share this. Memory and view distance are sized accordingly (§8). Single-core speed is modest, so the main server thread is the bottleneck. |
-| **Only ~3.6 GB of free disk right now** (several TB coming soon) | Enough to start, but backups will be offloaded to Drive almost immediately until the extra space arrives (§11). |
+| **Only ~5.7 GB free on `/home` right now** (several TB coming soon) | Enough to start, but backups will be offloaded to Drive almost immediately until the extra space arrives (§11). |
 
 ---
 
@@ -214,9 +219,10 @@ servers with `/server survival` / `/server creative` (or a lobby/compass item la
 - Runs with `network_mode: "service:velocity"` so the tunnel's local target is
   `127.0.0.1:25565`, i.e. Velocity. In the playit dashboard, the Minecraft Java
   tunnel points at `127.0.0.1:25565`.
-- The `SECRET_KEY` lives in `.env`, **not** in `docker-compose.yml`. The key now
-  in `prepucio/docker-compose.yml` has been exposed in plain text, so generate a
-  new agent secret in the playit dashboard and revoke the old one (§12).
+- The `SECRET_KEY` lives in `.env` as `PLAYIT_SECRET_KEY`, **not** in
+  `docker-compose.yml`. Compose reads it as `${PLAYIT_SECRET_KEY}`. The owner
+  chose to keep the existing key; it was moved out of the compose file before the
+  first git commit and has never been in git history (§12).
 - **Real player IPs: use playit's PROXY protocol v2.**
   - In the playit dashboard (https://playit.gg/account/tunnels/ → the tunnel →
     **"Proxy Protocol"**), choose **Version 2**.
@@ -297,6 +303,13 @@ servers with `/server survival` / `/server creative` (or a lobby/compass item la
 | Performance | spark | |
 
 - `gamemode=creative`, `force-gamemode=true`.
+- **Version: Paper 26.2 (temporary).** PlotSquared is broken on 26.3 (#4960), so
+  creative runs Paper 26.2 with **ViaVersion**, which lets 26.3 clients join a
+  26.2 server. Players coming through Velocity on 26.3 switch to creative without
+  noticing; only 26.3-only blocks (cushions, poplar) don't exist there. Every
+  creative plugin jar must be the **26.2-compatible** build. Once PlotSquared
+  supports 26.3: back up, bump `VERSION`, update the jars, and remove ViaVersion.
+  Upgrading is one-way, which is fine here.
 
 #### Creative worlds
 
@@ -361,17 +374,8 @@ Three groups to start. More may be added later as more plugins are added.
 ## 7. Open Questions
 
 ### Still open
-1. **Creative plot world vs. PlotSquared's 26.3 bug (#4960).** Options:
-   - (a) Run the **creative server on Paper 26.2** with ViaVersion, so 26.3 players
-     can still join. Survival stays on 26.3. Upgrade creative to 26.3 once
-     PlotSquared is fixed (upgrading is safe; only downgrading isn't).
-   - (b) Keep creative on 26.3 and **launch the build world first**. Add the plot
-     world when PlotSquared ships a fix.
-   - (c) Write a custom plot plugin. This is not a small plugin: it needs a world
-     generator, protection and a FAWE hook.
-2. **Server blockers:** `/home` has only 553 MB free; 11 of 15 GB RAM is already in
-   use (a ~5.9 GB `java` process and a ~4.3 GB QEMU VM); user `jt` isn't in the
-   `docker` group.
+- Nothing blocking. Remaining host setup: install `rclone` and link Google Drive
+  (§11) before backups go live.
 
 ### Decided (2026-11-22)
 | Topic | Decision |
@@ -389,6 +393,9 @@ Three groups to start. More may be added later as more plugins are added.
 | Build world | **Normal terrain** |
 | Terrain tools | **FastAsyncVoxelSniper** (works on 26.3); others added later by the owner |
 | Real IPs (Phase 1) | playit **PROXY protocol v2** + Velocity `haproxy-protocol = true` |
+| Creative version | **Paper 26.2 + ViaVersion** until PlotSquared fixes #4960, then upgrade to 26.3. Survival is on 26.3. |
+| Host resources | The QEMU VM will scale down; the RAM plan in §8 stands. `jt` is in the `docker` group. |
+| Repo | `~/mc` (renamed from `prepucio`), remote `github.com/jaimexu8/trapaholics` |
 | Admin alerts | **Discord webhook** to an admin-only log channel in the server's Discord |
 | Backups | Every 4 h; Drive after 24 h; **encrypted**; deleted from Drive **30 days** after upload; Drive has 5 TB, so storage isn't a concern |
 
@@ -420,22 +427,23 @@ Bridge, 2011).
   - Strict FAWE limits on creative (§5.6).
   - Paper's performance options (`paper-world-defaults.yml`: entity limits,
     hopper/redstone tuning) as needed, measured with spark.
-- Disk: only ~3.6 GB free now, so expect early backups to move to Drive almost
+- Disk: only ~5.7 GB free now, so expect early backups to move to Drive almost
   immediately (§11.5). Several TB are coming soon.
 
 ---
 
-## 9. Directory Layout (proposed, in `prepucio/`)
+## 9. Directory Layout (`~/mc`)
 
 ```
-prepucio/
+mc/
 ├── ARCHITECTURE.md          ← this file
 ├── docker-compose.yml       ← velocity, survival, creative, mariadb, playit (Phase 1) / frpc (Phase 2)
 ├── .env                     ← secrets (gitignored): playit secret, forwarding secret, DB pw, RCON pw, (Phase 2) frp token
 ├── frpc.toml                ← Phase 2 tunnel client config (from mc/frpc.toml, + token + proxy protocol)
 ├── relay/                   ← Phase 2 cloud-side config (frps.toml, setup notes)
 ├── velocity/                ← Velocity data (velocity.toml, forwarding.secret, plugins/)
-├── survival/                ← Paper data (current prepucio/data/ migrates here)
+├── survival/                ← Paper data (fresh world)
+├── data/                    ← OLD prepucio server data (26.2 world), gitignored; not used, delete once the new setup is live
 ├── creative/                ← Paper data
 ├── scripts/                 ← backup.sh, offload.sh, prune-drive.sh (see §11)
 └── backups/                 ← local backup archives (≤ ~24 h old), gitignored
@@ -617,11 +625,12 @@ new backup due
 
 ## 12. Security Notes
 
-- ⚠️ `prepucio/docker-compose.yml` currently contains a **plaintext playit
-  `SECRET_KEY`**, and `data/server.properties` contains the RCON password and
-  management-server secret. Move all secrets to `.env` (gitignored) and
-  **revoke the exposed playit key and create a new one** for Phase 1. Revoke that
-  one too at the Phase 2 switch-over.
+- The playit `SECRET_KEY` was moved from `docker-compose.yml` to `.env` (mode 600,
+  gitignored) before the first commit, so it is not in git. The owner chose
+  **not** to rotate it; it had been stored in plain text in the old compose file.
+  Revoke it at the Phase 2 switch-over. The old `data/server.properties` (RCON
+  password, management secret) is gitignored. New servers take RCON passwords
+  from `.env`.
 - Backends + MariaDB on an internal Docker network only. Only the tunnel
   (playit, later frpc) can reach Velocity, and no game port is published on the
   host.
@@ -675,18 +684,19 @@ new backup due
 ## 14. Roadmap
 
 **Phase 1 — build on playit (now)**
-1. Confirm 26.3 releases for PlotSquared and the chosen terrain tools (§4, §7).
-2. Revoke the exposed playit key and create a new one. Archive the old
-   `prepucio/data/`.
-3. Restructure `prepucio/` into the layout in §9. Write the new
+1. ~~Confirm plugin versions~~ (done, §4). ~~Rename `prepucio/` → `~/mc`, git
+   remote, secret moved to `.env`~~ (done).
+2. Delete the old `data/` once the new setup is live (it frees ~280 MB).
+3. Restructure `~/mc` into the layout in §9. Write the new
    `docker-compose.yml` (velocity, survival, creative, mariadb, playit) and `.env`.
 4. Velocity + survival first: verify players can join through the playit address.
 5. Add MariaDB + LuckPerms (network-wide). Create the `default`, `builder` and
    `admin` groups.
 6. Survival plugins: EssentialsX-dev, GriefPrevention, WorldGuard at spawn.
    Pre-generate the world.
-7. Creative: FAWE, PlotSquared plot world, build world with WorldGuard + builder
-   permissions, FAWE limits.
+7. Creative (**Paper 26.2 + ViaVersion**, §5.6): FAWE, PlotSquared plot world,
+   build world with WorldGuard + builder permissions, FastAsyncVoxelSniper, FAWE
+   limits.
 8. Backups (§11): `rclone` with the `gdrive` and `gdrive-crypt` remotes (save the
    crypt password off the server), `backup.sh` / `offload.sh` / `prune-drive.sh`,
    and systemd timers. Test the low-disk-space path, the 30-day pruning, and a full
