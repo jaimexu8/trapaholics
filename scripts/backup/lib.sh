@@ -34,7 +34,7 @@ _BACKUP_OVERRIDE_KEYS=(
   DOCKER_TIMEOUT_SEC SAVE_ALL_FLUSH_TIMEOUT_SEC MARIADB_DUMP_TIMEOUT_SEC
   OFFLOAD_LOCK_WAIT_SEC PRUNE_LOCK_WAIT_SEC
   LOCK_NAME OFFLOAD_LOCK_NAME PRUNE_LOCK_NAME
-  UPLOADED_LOG_NAME OFFLOAD_FAIL_COUNT_NAME OFFLOAD_LOCK_SKIP_COUNT_NAME
+  UPLOADED_LOG_NAME OFFLOAD_FAIL_COUNT_NAME OFFLOAD_TOUCH_FAIL_COUNT_NAME OFFLOAD_LOCK_SKIP_COUNT_NAME
   DOCKER_BIN RCLONE_BIN TAR_BIN ZSTD_BIN DF_BIN DATE_BIN CURL_BIN TIMEOUT_BIN FLOCK_BIN
   SHA256SUM_BIN BACKUP_ARCHIVE_STAMP
 )
@@ -113,6 +113,7 @@ backup_load_config() {
   PRUNE_LOCK_NAME=".prune.lock"
   UPLOADED_LOG_NAME=".uploaded.log"
   OFFLOAD_FAIL_COUNT_NAME=".offload-fail-count"
+  OFFLOAD_TOUCH_FAIL_COUNT_NAME=".offload-touch-fail-count"
   OFFLOAD_LOCK_SKIP_COUNT_NAME=".offload-lock-skip-count"
   BACKUP_ARCHIVE_STAMP="${BACKUP_ARCHIVE_STAMP:-}"
 
@@ -134,6 +135,7 @@ backup_load_config() {
   STAGING_DIR="${STAGING_DIR:-${BACKUP_DIR}/.staging}"
   UPLOADED_LOG="${BACKUP_DIR}/${UPLOADED_LOG_NAME}"
   OFFLOAD_FAIL_COUNT_FILE="${BACKUP_DIR}/${OFFLOAD_FAIL_COUNT_NAME}"
+  OFFLOAD_TOUCH_FAIL_COUNT_FILE="${BACKUP_DIR}/${OFFLOAD_TOUCH_FAIL_COUNT_NAME}"
   OFFLOAD_LOCK_SKIP_COUNT_FILE="${BACKUP_DIR}/${OFFLOAD_LOCK_SKIP_COUNT_NAME}"
   # shellcheck disable=SC2034
   LOCK_FILE="${BACKUP_DIR}/${LOCK_NAME}"
@@ -163,6 +165,7 @@ backup_load_config() {
   STAGING_DIR="${STAGING_DIR:-${BACKUP_DIR}/.staging}"
   UPLOADED_LOG="${BACKUP_DIR}/${UPLOADED_LOG_NAME}"
   OFFLOAD_FAIL_COUNT_FILE="${BACKUP_DIR}/${OFFLOAD_FAIL_COUNT_NAME}"
+  OFFLOAD_TOUCH_FAIL_COUNT_FILE="${BACKUP_DIR}/${OFFLOAD_TOUCH_FAIL_COUNT_NAME}"
   OFFLOAD_LOCK_SKIP_COUNT_FILE="${BACKUP_DIR}/${OFFLOAD_LOCK_SKIP_COUNT_NAME}"
   # shellcheck disable=SC2034
   LOCK_FILE="${BACKUP_DIR}/${LOCK_NAME}"
@@ -288,12 +291,13 @@ backup_free_bytes() {
 
 backup_live_data_bytes() {
   local total=0
-  local item path
+  local item path kb
   # shellcheck disable=SC2086
   for item in $BACKUP_INCLUDE_PATHS; do
     path="${REPO_ROOT}/${item}"
     if [[ -e "$path" ]]; then
-      total=$((total + $(du -sk "$path" 2>/dev/null | awk '{print $1 * 1024}')))
+      kb="$(du -sk "$path" 2>/dev/null | awk '{print $1}')"
+      total=$((total + kb * 1024))
     fi
   done
   printf '%s' "$total"
@@ -752,13 +756,15 @@ offload_archive() {
 
   # Safety-net age tracks upload time: touch REMOTE objects after verify.
   # --no-create (-C): never invent a missing remote file.
+  # Touch failures use a separate counter so a later _offload_fail_reset
+  # (successful upload path) cannot wipe them.
   if ! "$RCLONE_BIN" touch --no-create "$(rclone_remote_path "$base")"; then
     log_warn "rclone touch failed for ${base} (safety-net age may be off)"
-    _offload_fail_bump "rclone touch failed for ${base}"
+    _offload_touch_fail_bump "rclone touch failed for ${base}"
   fi
   if ! "$RCLONE_BIN" touch --no-create "$(rclone_remote_path "${base}.sha256")"; then
     log_warn "rclone touch failed for ${base}.sha256 (safety-net age may be off)"
-    _offload_fail_bump "rclone touch failed for ${base}.sha256"
+    _offload_touch_fail_bump "rclone touch failed for ${base}.sha256"
   fi
 
   local uploaded_at
@@ -789,6 +795,25 @@ _offload_fail_bump() {
 
 _offload_fail_reset() {
   rm -f "$OFFLOAD_FAIL_COUNT_FILE"
+}
+
+_offload_touch_fail_bump() {
+  local reason="$1"
+  local count=0
+  if [[ -f "$OFFLOAD_TOUCH_FAIL_COUNT_FILE" ]]; then
+    count="$(tr -d '[:space:]' <"$OFFLOAD_TOUCH_FAIL_COUNT_FILE" || echo 0)"
+  fi
+  count=$((count + 1))
+  printf '%s\n' "$count" >"$OFFLOAD_TOUCH_FAIL_COUNT_FILE"
+  if [[ "$count" -ge "$OFFLOAD_FAIL_ALERT_THRESHOLD" ]]; then
+    discord_alert "upload/verify failure" \
+      "Repeated rclone touch failures (${count}): ${reason}"
+    _offload_touch_fail_reset
+  fi
+}
+
+_offload_touch_fail_reset() {
+  rm -f "$OFFLOAD_TOUCH_FAIL_COUNT_FILE"
 }
 
 # Offload the oldest archive that has a .sha256; skip candidates missing checksums.

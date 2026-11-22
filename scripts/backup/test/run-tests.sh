@@ -139,6 +139,7 @@ OFFLOAD_LOCK_NAME=".offload.lock"
 PRUNE_LOCK_NAME=".prune.lock"
 UPLOADED_LOG_NAME=".uploaded.log"
 OFFLOAD_FAIL_COUNT_NAME=".offload-fail-count"
+OFFLOAD_TOUCH_FAIL_COUNT_NAME=".offload-touch-fail-count"
 OFFLOAD_LOCK_SKIP_COUNT_NAME=".offload-lock-skip-count"
 EOF
 
@@ -754,7 +755,17 @@ test_p_missing_sha256_skips_in_oldest_one() {
 test_q_release_lock_preserves_stderr() {
   echo "TEST (q): release_offload_lock must not discard shell stderr"
   setup_fixture
-  # Reproduce the path that used to permanently redirect stderr (test d → ensure_space).
+  # Subshell starts with stderr → q.err. Buggy `exec 201>&- 2>/dev/null` would
+  # permanently retarget that fd to /dev/null before log_warn runs.
+  local marker="alive-$$"
+  (
+    acquire_offload_lock 0 || true
+    release_offload_lock
+    log_warn "$marker"
+  ) 2>"${FIX}/state/q.err"
+  assert_true "stderr survives release" grep -q "$marker" "${FIX}/state/q.err"
+
+  # Same check through backup_ensure_space (which releases the offload lock).
   cat >"${FIX}/stubs/df" <<EOF
 #!/usr/bin/env bash
 echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
@@ -762,21 +773,13 @@ echo "/dev/test 1000000000 1 0 1% /"
 EOF
   chmod +x "${FIX}/stubs/df"
   echo "fail" >"${FIX}/state/rclone_copy"
-  make_fake_archive 'trapaholics-2026-01-01_0000.tar.zst' >/dev/null
-  backup_ensure_space >/dev/null 2>"${FIX}/state/ensure.err" || true
-
-  # After release_offload_lock inside ensure_space, stderr must still work.
-  local line
-  line="$(log_warn "stderr-still-alive-$$" 2>&1 >/dev/null)"
-  assert_true "log_warn reaches stderr after release_offload_lock" \
-    grep -q "stderr-still-alive-$$" <<<"$line"
-
-  # Direct call too
-  acquire_offload_lock 0 || true
-  release_offload_lock
-  line="$(log_warn "stderr-after-direct-release-$$" 2>&1 >/dev/null)"
-  assert_true "stderr ok after direct release" \
-    grep -q "stderr-after-direct-release-$$" <<<"$line"
+  make_fake_archive 'trapaholics-2026-01-02_0000.tar.zst' >/dev/null
+  local marker2="alive-ensure-$$"
+  (
+    backup_ensure_space || true
+    log_warn "$marker2"
+  ) 2>"${FIX}/state/q-ensure.err"
+  assert_true "stderr survives ensure_space release" grep -q "$marker2" "${FIX}/state/q-ensure.err"
   teardown_fixture
 }
 
@@ -796,6 +799,26 @@ test_r_orphan_sha256_and_stamp_validation() {
   set -e
   assert_true "invalid stamp rejected" test "$rc" -ne 0
   unset BACKUP_ARCHIVE_STAMP
+  teardown_fixture
+}
+
+test_s_touch_failures_alert() {
+  echo "TEST (s): repeated rclone touch failures alert (own counter, not reset by success)"
+  setup_fixture
+  export OFFLOAD_FAIL_ALERT_THRESHOLD=3
+  echo "fail" >"${FIX}/state/rclone_touch"
+  rm -f "${FIX}/state/curl.log" "${FIX}/state/curl.payload"
+
+  local i arch
+  for i in 1 2 3; do
+    arch="$(make_fake_archive "trapaholics-2026-04-0${i}_1200.tar.zst")"
+    # copy+cryptcheck succeed; touch fails — upload still completes
+    offload_archive "$arch" || true
+  done
+
+  # 3 archives × 2 touches (archive + sha256) = 6 bumps; alert fires at threshold 3
+  assert_alert_title "touch failure alert" "upload/verify failure"
+  assert_file_contains "touch failure message" "${FIX}/state/curl.payload" 'touch'
   teardown_fixture
 }
 
@@ -825,6 +848,7 @@ test_o_notfound_false_positive
 test_p_missing_sha256_skips_in_oldest_one
 test_q_release_lock_preserves_stderr
 test_r_orphan_sha256_and_stamp_validation
+test_s_touch_failures_alert
 
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed, ${SKIP} skipped"
