@@ -24,9 +24,15 @@
   - **Survival** — mostly vanilla gameplay on **hard** difficulty, with
     quality-of-life plugins: TPA, homes, spawn, and player land claims
     (GriefPrevention), with WorldGuard protecting spawn.
-  - **Creative** — a building server with two worlds: a **plot world** where every
-    player can use **FastAsyncWorldEdit (FAWE)** inside their own plot, and an open
-    **build world** where only builders can use FAWE and terrain tools, anywhere.
+  - **Creative** — a building server with **one creative world** (normal terrain).
+    Everyone can build by hand; **builders** get **FastAsyncWorldEdit (FAWE)** and
+    terrain tools. **No plots for now**: PlotSquared is broken on 26.3, and the
+    owner may add plots later (§5.6).
+- **Feels like one server:** survival and creative are separate worlds, but the
+  **chat, tab list and `/tpa` are shared** across both (§3.3).
+- **Java and Bedrock, with vanilla clients only:** Java is the main edition.
+  Bedrock players join through Geyser + Floodgate. Nobody needs client mods (§5.8).
+- **Everything on Minecraft 26.3.**
 - **LuckPerms** as the single source of truth for roles and permissions.
 - Run on the **newest Minecraft version that has solid plugin support** (see §4).
 - Everything runs in Docker on the home server, reproducible from this directory.
@@ -42,7 +48,13 @@
   (permissions, region protection, world editing).
 
 ### Non-Goals (for now)
-- Bedrock / console support (Geyser/Floodgate support 26.3 and could be added later — see §4).
+- **Offline (non-Mojang) Java accounts**: not at launch. Java players must use
+  Mojang accounts. This may be revisited later as a separate, tested step, using a
+  login plugin plus SkinsRestorer (server-side only, so vanilla clients still
+  work). It is held back for now because the main free login plugin (LibreLogin)
+  hasn't had a release since Jan 2025, and a misconfigured login setup would let
+  anyone join under staff names.
+- **Plots** (PlotSquared) until it supports 26.3, and only if the owner wants them.
 - Modded gameplay (the old `mc/` NeoForge setup is **not** being carried forward).
 - Minigames, economy, or ranks-for-purchase.
 
@@ -118,6 +130,22 @@ In Phase 1, the cloud relay box below is replaced by playit.gg's network, and
 **Velocity proxy**. Players connect once (playit address, later `trapaholics.net`) and move between
 servers with `/server survival` / `/server creative` (or a lobby/compass item later).
 
+### 3.3 Shared chat, tab list and teleports
+
+The owner wants survival and creative to feel like **different worlds on one
+server**. They stay two Paper servers (for the reasons below), and these
+network plugins make them behave as one:
+
+| Feature | Plugin | Where |
+|---|---|---|
+| One tab list showing everyone on both servers | **TAB** | Velocity |
+| One shared chat: players on survival and creative talk to each other | network chat plugin (e.g. Carbon with a small Redis container, or a small custom Velocity plugin) | Velocity / both backends |
+| `/tpa`, `/tpahere`, `/home`, `/spawn` across servers (a survival player can `/tpa` to someone on creative) | **HuskHomes** (MariaDB-backed), replacing EssentialsX's teleport commands | both backends |
+
+The implementer picks the exact chat plugin based on 26.3 support. If no
+suitable one exists, a small custom Velocity plugin is acceptable (§1, Custom
+plugins).
+
 ### Why a proxy + two backends (instead of one server with Multiverse)?
 - **Plugin isolation:** FAWE/VoxelSniper only exist on creative; survival never loads
   them, so there is no risk of a permission leak giving survival players WorldEdit.
@@ -128,8 +156,10 @@ servers with `/server survival` / `/server creative` (or a lobby/compass item la
 - Cost: one extra JVM (~512 MB for Velocity) and a slightly more complex setup.
 
 > Alternative considered: one Paper server + Multiverse-Core + Multiverse-Inventories
-> + per-world LuckPerms contexts. Simpler, lighter on RAM, but weaker isolation.
-> Kept as a fallback if 16 GB turns out to be too tight.
+> + per-world LuckPerms contexts. Chat, tab and `/tpa` would be shared natively,
+> but FAWE edits would lag survival players on this CPU and isolation is weaker.
+> Kept as a fallback if 16 GB turns out to be too tight or the network plugins
+> don't work out.
 
 ---
 
@@ -156,7 +186,11 @@ servers with `/server survival` / `/server creative` (or a lobby/compass item la
 | Geyser / Floodgate | 2.12.1 (beta) / 2.2.7 | ✅ |
 | **EssentialsX** | 2.22.0 stable = **up to 26.1.2 only** | ⚠️ 26.3 only in dev builds (2.22.1-dev) |
 | HuskClaims | 1.5.10 (up to 1.21.7) | ❌ |
-| **PlotSquared** | 7.6.1 (supports up to 26.2) | ❌ **open bug #4960**: chat output and titles break on 26.3; also #4959 (cushions not protected) |
+| **PlotSquared** | 7.6.1 (supports up to 26.2) | ❌ **open bug #4960** → **dropped for now** (no plots) |
+| Geyser (Velocity) / Floodgate | 2.12.1 (beta) / 2.2.7 | ✅ 26.3 |
+| TAB | 6.2.1 | ✅ 26.3 |
+| HuskHomes | 4.11.1 | ✅ 26.3 |
+| SkinsRestorer | 15.12.6 | ✅ 26.3 (only needed if offline accounts are added later) |
 | **FastAsyncVoxelSniper** | 3.2.5 (lists 26.3; works with FAWE) | ✅ |
 | VoxelSniper-Reimagined | 8.14.0 (2024, not maintained) | ❌ |
 | CoreProtect | v24.1 public release = up to 26.2; v25 (26.3) on Patreon or built from source | ⚠️ build from GitHub source |
@@ -185,9 +219,10 @@ servers with `/server survival` / `/server creative` (or a lobby/compass item la
 - When EssentialsX 2.22.1 is released, swap the dev jars for the release. If the
   dev build ever breaks, fall back to Option C (custom plugin).
 - **PlotSquared does not work on 26.3 yet** (issue #4960, open as of 2026-11-22).
-  This affects the creative plot world; see the creative decision in §7.
-  PlotSquared's code is GPL-3.0: the SpigotMC download is paid, but building it
-  from the GitHub source is free and allowed.
+  **Decision: everything runs on 26.3, and PlotSquared is dropped for now.** The
+  creative server is a single creative world without plots. If plots are wanted
+  later, add PlotSquared once it supports 26.3 (its code is GPL-3.0: the SpigotMC
+  download is paid, but building from the GitHub source is free).
 - Pin exact versions (`VERSION`, Paper build, plugin jars) in compose/env — never
   use `latest` for game servers, to avoid surprise world upgrades.
 
@@ -274,7 +309,7 @@ servers with `/server survival` / `/server creative` (or a lobby/compass item la
 | Purpose | Plugin (proposed) | Notes |
 |---|---|---|
 | Permissions | LuckPerms | Shared DB with other servers |
-| Teleport / homes / spawn / warps | EssentialsX 2.22.1-dev (+ EssentialsXSpawn) | `/tpa`, `/tpahere`, `/home`, `/spawn` |
+| Teleport / homes / spawn | **HuskHomes** (cross-server, §3.3) | `/tpa`, `/tpahere`, `/home`, `/spawn`. EssentialsX stays for other utilities, with its teleport commands disabled |
 | Player land claims | **GriefPrevention** | Players claim their own land with a golden shovel. Claim blocks build up with playtime. |
 | Admin protection | WorldGuard (+ WorldEdit as its dependency) | Spawn and other shared areas, set up by admins |
 | Performance | spark | Already used in `prepucio/` |
@@ -293,54 +328,50 @@ servers with `/server survival` / `/server creative` (or a lobby/compass item la
 | Purpose | Plugin (proposed) | Notes |
 |---|---|---|
 | Permissions | LuckPerms | Shared DB |
-| Building | **FastAsyncWorldEdit** | Replaces WorldEdit on this server |
-| Plots | **PlotSquared** (26.3 support to confirm) | Plot world, plot claiming, keeps FAWE inside the player's own plot |
-| Multiple worlds | Multiverse-Core (or PlotSquared's own world handling) | Plot world + build world on one server |
-| Build-world protection | WorldGuard | Stops non-builders from changing the build world |
-| Terrain tools | **FastAsyncVoxelSniper 3.2.5** | Maintained VoxelSniper fork that supports 26.3 and goes through FAWE. Builder-only, build world only. Other tools may be added later |
+| Building | **FastAsyncWorldEdit** | Replaces WorldEdit on this server. Builders only |
+| Spawn protection | WorldGuard 7.0.21 | Protects the creative spawn area |
+| Terrain tools | **FastAsyncVoxelSniper 3.2.5** | Maintained VoxelSniper fork that supports 26.3 and goes through FAWE. Builders only. Other tools may be added later |
+| Teleports | HuskHomes | Cross-server `/tpa`, `/home`, `/spawn` (§3.3) |
 | Block logging / rollback | **CoreProtect** (built from GitHub source for 26.3) | Undo griefing; the server is open to anyone. Also useful on survival |
 | Utilities | EssentialsX 2.22.1-dev | `/tp`, `/speed`, `/gamemode` |
 | Performance | spark | |
 
 - `gamemode=creative`, `force-gamemode=true`.
-- **Version: Paper 26.2 (temporary).** PlotSquared is broken on 26.3 (#4960), so
-  creative runs Paper 26.2 with **ViaVersion**, which lets 26.3 clients join a
-  26.2 server. Players coming through Velocity on 26.3 switch to creative without
-  noticing; only 26.3-only blocks (cushions, poplar) don't exist there. Every
-  creative plugin jar must be the **26.2-compatible** build. Once PlotSquared
-  supports 26.3: back up, bump `VERSION`, update the jars, and remove ViaVersion.
-  Upgrading is one-way, which is fine here.
+- **Version: Paper 26.3**, the same as survival. No ViaVersion needed.
 
-#### Creative worlds
+#### Creative world
 
-| World | Who can build | FAWE | Notes |
+| World | Who can build | FAWE / terrain tools | Notes |
 |---|---|---|---|
-| **`plots`** (default spawn world) | Plot owners (and anyone they add) | **Everyone**, but **only inside their own plot** | Flat plot grid managed by PlotSquared |
-| **`build`** | **Builders and admins only** | **Builders: anywhere in the world** | Open world with **normal generated terrain** for large terrain projects. Default players can visit but not change anything. |
+| **`world`** (the creative server's only world) | **Everyone** (by hand) | **Builders and admins only**, anywhere | Normal generated terrain. The spawn area is protected by WorldGuard |
 
-- **Getting a plot:** a player runs a request command (PlotSquared's `/plot auto`)
-  and is given the **closest unclaimed plot to the centre** of the plot world.
-  PlotSquared's auto-claim already works outward from the centre; confirm this
-  once it's set up. If it doesn't match exactly, a small custom plugin or command
-  wrapper can handle it (§1, Custom plugins).
-- **Plot size: 64×64 blocks.** Roads between plots are a PlotSquared setting
-  (e.g. 7 blocks wide).
-- **Plot limit: 1 per player** (`plots.plot.1` for `default`). Easy to raise later
-  through LuckPerms.
-- **Keeping FAWE inside plots:** FAWE's PlotSquared integration (its "region
-  restrictions") limits each player's edits to plots they own or have been added
-  to. Players without the bypass permission can't edit outside their plots.
-- **Build world:** WorldGuard's `__global__` region denies building to everyone
-  except the `builder` and `admin` groups, and FAWE's region restrictions are
-  bypassed for builders in that world, so they can edit anywhere there.
+- Default players build by hand in creative mode. With no plots, nothing stops
+  them building next to (or over) someone else's build, so **CoreProtect** is the
+  griefing safety net: staff can look up and roll back changes.
+- Builders get FAWE and FastAsyncVoxelSniper across the whole world.
+- **Adding plots later:** once PlotSquared supports 26.3, a plot world can be
+  added next to this world without rebuilding anything (64×64 plots, 1 per player,
+  `/plot auto` from the centre, FAWE inside own plot: the earlier plan is kept in
+  git history).
 - **FAWE limits** (`plugins/FastAsyncWorldEdit/config.yml`): tight limits for
   default players (max blocks changed per command, radius, history size) and
   higher limits for builders. These matter on a 4-core 2011-era CPU, where one
   huge edit can lag the whole creative server.
 
+### 5.8 Bedrock support (Geyser + Floodgate)
+- **Geyser** on Velocity translates Bedrock clients to Java. **Floodgate** lets
+  Bedrock players join without a Java account, and shows their skins to Java
+  players. Neither needs client mods.
+- Bedrock uses **UDP port 19132**. Phase 1: add a Bedrock (UDP) tunnel in playit
+  pointing at Geyser (confirm the free plan allows it). Phase 2: forward UDP 19132
+  through frp and open it on the Oracle instance.
+- Bedrock players appear with a name prefix (Floodgate's default `.`), so their
+  names can't clash with Java names.
+- Geyser for Velocity is labelled **beta** on Modrinth; pin a build and test it.
+
 ### 5.7 Database (MariaDB)
-- One MariaDB container on the internal network for **LuckPerms** (required for
-  shared permissions across Velocity + both backends).
+- One MariaDB container on the internal network for **LuckPerms** and
+  **HuskHomes** (both need data shared across servers).
 - Not exposed to host or internet. Credentials via `.env` (gitignored).
 - Optionally reused later by CoreProtect, claims plugin, etc.
 
@@ -356,15 +387,15 @@ Three groups to start. More may be added later as more plugins are added.
 
 | Group | Inherits | Survival | Creative | Network |
 |---|---|---|---|---|
-| `default` | — | Minimal: `/tpa`, `/tpahere`, `/home` (limited), `/spawn`, GriefPrevention claims | Claim a plot (`/plot auto`), build in own plot, **FAWE inside own plot only** (tight limits). Visit the build world without building. | `/server` |
-| `builder` *(name may change)* | default | same as default | **Build world: build + FAWE anywhere**, terrain tools, higher FAWE limits | |
+| `default` | — | Minimal: GriefPrevention claims | Build by hand (creative mode). **No FAWE or terrain tools.** | Shared chat, `/server`, cross-server `/tpa`, `/tpahere`, `/home` (limited), `/spawn` (HuskHomes) |
+| `builder` *(name may change)* | default | same as default | **FAWE + FastAsyncVoxelSniper anywhere** in the creative world, with higher FAWE limits | |
 | `admin` | — | `*` (all permissions) | `*` | `*` |
 
 - The `builder` group's name is a placeholder. Because permissions are attached to
   the group, renaming it later (`/lp group builder rename <new>`) is cheap.
 - Builder powers are limited to the creative server with the LuckPerms
-  `server=creative` context (and `world=build` where needed), so they never apply
-  on survival.
+  `server=creative` context, so they never apply on survival.
+- Bedrock players (via Floodgate) get the same groups as Java players.
 - `admin` gets `*` on every server, including Velocity.
 - Avoid OPs; use `ops.json` only for the owner as a break-glass fallback.
 - Promotion is manual: `/lp user <name> parent add builder`.
@@ -389,11 +420,16 @@ Three groups to start. More may be added later as more plugins are added.
 | Tunnel | **playit.gg now** (Phase 1); frp + new Oracle Cloud instance + `trapaholics.net` later (Phase 2) |
 | DNS | Owner controls `trapaholics.net` DNS |
 | Access | **Open to anyone** (no whitelist) |
-| Plots | **64×64** blocks, **1 plot per player** (may change later) |
-| Build world | **Normal terrain** |
+| Plots | ~~64×64, 1 per player~~ → **dropped for now** (see Version) |
+| Creative terrain | **Normal terrain** |
 | Terrain tools | **FastAsyncVoxelSniper** (works on 26.3); others added later by the owner |
 | Real IPs (Phase 1) | playit **PROXY protocol v2** + Velocity `haproxy-protocol = true` |
-| Creative version | **Paper 26.2 + ViaVersion** until PlotSquared fixes #4960, then upgrade to 26.3. Survival is on 26.3. |
+| Version | **Everything on 26.3.** PlotSquared is dropped for now |
+| Creative | **One creative world** with no plots. Everyone builds by hand; builders get FAWE + FastAsyncVoxelSniper; CoreProtect for rollback |
+| One-server feel | **Network plugins**: TAB (shared tab list), shared chat, HuskHomes (cross-server `/tpa`/`/home`/`/spawn`). Still two Paper servers behind Velocity (§3.3) |
+| Editions | **Java + Bedrock** (Geyser + Floodgate), vanilla clients only |
+| Accounts | **Mojang accounts only** at launch; offline accounts possibly later as a tested step |
+| Delivery | Bedrock, shared chat/tab/tpa and the creative changes go in a **follow-up PR on top of PR #2** |
 | Host resources | The QEMU VM will scale down; the RAM plan in §8 stands. `jt` is in the `docker` group. |
 | Repo | `~/mc` (renamed from `prepucio`), remote `github.com/jaimexu8/trapaholics` |
 | Admin alerts | **Discord webhook** to an admin-only log channel in the server's Discord |
@@ -694,9 +730,10 @@ new backup due
    `admin` groups.
 6. Survival plugins: EssentialsX-dev, GriefPrevention, WorldGuard at spawn.
    Pre-generate the world.
-7. Creative (**Paper 26.2 + ViaVersion**, §5.6): FAWE, PlotSquared plot world,
-   build world with WorldGuard + builder permissions, FastAsyncVoxelSniper, FAWE
-   limits.
+7. Creative (§5.6): first built on Paper 26.2 with plots (PR #2). The follow-up PR
+   moves it to **26.3 with one creative world and no plots**, builder-only
+   FAWE/FastAsyncVoxelSniper, and adds shared chat/tab/`/tpa` (§3.3) and Bedrock
+   via Geyser + Floodgate (§5.8).
 8. Backups (§11): `rclone` with the `gdrive` and `gdrive-crypt` remotes (save the
    crypt password off the server), `backup.sh` / `offload.sh` / `prune-drive.sh`,
    and systemd timers. Test the low-disk-space path, the 30-day pruning, and a full
