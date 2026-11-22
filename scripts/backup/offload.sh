@@ -34,9 +34,10 @@ cleanup() {
 trap cleanup EXIT
 
 if ! acquire_offload_lock 0; then
-  # Skip counted toward OFFLOAD_LOCK_SKIP_ALERT_THRESHOLD; no EXIT alert needed.
+  # Skip is expected when backup holds the lock; N-skip counter handles alerting.
+  # exit 0 so systemd does not treat a busy lock as a unit failure.
   ALERT_SENT=1
-  exit 1
+  exit 0
 fi
 
 main() {

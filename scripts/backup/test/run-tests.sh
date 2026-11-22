@@ -285,6 +285,8 @@ case "\$cmd" in
     [[ -f "${FIX}/state/remote/\$base" ]] || { echo "cryptcheck: remote missing"; exit 1; }
     ;;
   touch)
+    # Accept optional --no-create / -C before the remote path.
+    while [[ "\${1:-}" == -* ]]; do shift; done
     remote="\$1"
     base=\${remote##*/}
     base=\${base##*:}
@@ -749,6 +751,54 @@ test_p_missing_sha256_skips_in_oldest_one() {
   teardown_fixture
 }
 
+test_q_release_lock_preserves_stderr() {
+  echo "TEST (q): release_offload_lock must not discard shell stderr"
+  setup_fixture
+  # Reproduce the path that used to permanently redirect stderr (test d → ensure_space).
+  cat >"${FIX}/stubs/df" <<EOF
+#!/usr/bin/env bash
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "/dev/test 1000000000 1 0 1% /"
+EOF
+  chmod +x "${FIX}/stubs/df"
+  echo "fail" >"${FIX}/state/rclone_copy"
+  make_fake_archive 'trapaholics-2026-01-01_0000.tar.zst' >/dev/null
+  backup_ensure_space >/dev/null 2>"${FIX}/state/ensure.err" || true
+
+  # After release_offload_lock inside ensure_space, stderr must still work.
+  local line
+  line="$(log_warn "stderr-still-alive-$$" 2>&1 >/dev/null)"
+  assert_true "log_warn reaches stderr after release_offload_lock" \
+    grep -q "stderr-still-alive-$$" <<<"$line"
+
+  # Direct call too
+  acquire_offload_lock 0 || true
+  release_offload_lock
+  line="$(log_warn "stderr-after-direct-release-$$" 2>&1 >/dev/null)"
+  assert_true "stderr ok after direct release" \
+    grep -q "stderr-after-direct-release-$$" <<<"$line"
+  teardown_fixture
+}
+
+test_r_orphan_sha256_and_stamp_validation() {
+  echo "TEST (r): orphan .sha256 cleanup; invalid BACKUP_ARCHIVE_STAMP refused"
+  setup_fixture
+  printf 'deadbeef  trapaholics-2026-01-01_0000.tar.zst\n' \
+    >"${BACKUP_DIR}/trapaholics-2026-01-01_0000.tar.zst.sha256"
+  backup_cleanup_partials
+  assert_false "orphan sha256 removed" \
+    test -f "${BACKUP_DIR}/trapaholics-2026-01-01_0000.tar.zst.sha256"
+
+  export BACKUP_ARCHIVE_STAMP="not-a-stamp"
+  set +e
+  backup_create_archive >/dev/null 2>&1
+  local rc=$?
+  set -e
+  assert_true "invalid stamp rejected" test "$rc" -ne 0
+  unset BACKUP_ARCHIVE_STAMP
+  teardown_fixture
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -773,6 +823,8 @@ test_m_upload_fail_then_retry_by_filename_age
 test_n_ensure_space_lock_timeout
 test_o_notfound_false_positive
 test_p_missing_sha256_skips_in_oldest_one
+test_q_release_lock_preserves_stderr
+test_r_orphan_sha256_and_stamp_validation
 
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed, ${SKIP} skipped"

@@ -16,7 +16,7 @@ Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
 TimeoutStartSec=2h
-# Allow save-on restore on stop: ≥ 2 × SAVE_ALL_FLUSH_TIMEOUT_SEC (300s) + slack.
+# Allow save-on restore on stop: ≥ 2 × DOCKER_TIMEOUT_SEC (60s) for save-on + slack.
 TimeoutStopSec=900
 StandardOutput=journal
 StandardError=journal

@@ -103,7 +103,8 @@ backup_load_config() {
   DOCKER_TIMEOUT_SEC=60
   SAVE_ALL_FLUSH_TIMEOUT_SEC=300
   MARIADB_DUMP_TIMEOUT_SEC=900
-  OFFLOAD_LOCK_WAIT_SEC=3600
+  # Keep well under backup unit TimeoutStartSec=2h (worst case + archive time).
+  OFFLOAD_LOCK_WAIT_SEC=1800
   # Consumed by prune-drive.sh after sourcing.
   # shellcheck disable=SC2034
   PRUNE_LOCK_WAIT_SEC=900
@@ -258,20 +259,31 @@ backup_ensure_dirs() {
   chmod 700 "$BACKUP_DIR" || return 1
 }
 
-# Remove leftover *.partial* from interrupted runs (call while holding backup lock).
+# Remove leftover *.partial* and orphaned .sha256 files (call while holding backup lock).
 backup_cleanup_partials() {
-  local f
+  local f base archive
   shopt -s nullglob
   for f in "$BACKUP_DIR"/trapaholics-*.partial "$BACKUP_DIR"/trapaholics-*.partial.*; do
     log_warn "removing stale partial: $(basename "$f")"
     rm -f "$f"
   done
+  for f in "$BACKUP_DIR"/trapaholics-*.tar.zst.sha256; do
+    base="$(basename "$f" .sha256)"
+    archive="${BACKUP_DIR}/${base}"
+    if [[ ! -f "$archive" ]]; then
+      log_warn "removing orphaned checksum (no archive): $(basename "$f")"
+      rm -f "$f"
+    fi
+  done
   shopt -u nullglob
 }
 
 backup_free_bytes() {
-  local path="${1:-$BACKUP_DIR}"
-  "$DF_BIN" -Pk "$path" | awk 'NR==2 { print $4 * 1024 }'
+  # Multiply in bash — awk may print scientific notation for large products,
+  # which bash arithmetic cannot parse.
+  local kb
+  kb="$("$DF_BIN" -Pk "$BACKUP_DIR" | awk 'NR==2 { print $4 }')"
+  printf '%s' "$((kb * 1024))"
 }
 
 backup_live_data_bytes() {
@@ -499,6 +511,10 @@ backup_build_tar_args() {
 backup_create_archive() {
   local stamp name archive partial dump_abs stage_link
   if [[ -n "${BACKUP_ARCHIVE_STAMP:-}" ]]; then
+    if [[ ! "$BACKUP_ARCHIVE_STAMP" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{4}$ ]]; then
+      log_error "BACKUP_ARCHIVE_STAMP must match YYYY-MM-DD_HHMM (got '${BACKUP_ARCHIVE_STAMP}')"
+      return 1
+    fi
     stamp="$BACKUP_ARCHIVE_STAMP"
   else
     stamp="$("$DATE_BIN" -u '+%Y-%m-%d_%H%M')"
@@ -629,8 +645,11 @@ rclone_remote_path() {
   fi
 }
 
+# Close FD 201 only. Never put redirects on a bare `exec` — they permanently
+# alter the shell's own fds (e.g. `exec 201>&- 2>/dev/null` discards stderr).
+# Wrapping in `{ ... } 2>/dev/null` silences "not open" without touching fd 2.
 release_offload_lock() {
-  exec 201>&- 2>/dev/null || true
+  { exec 201>&-; } 2>/dev/null || true
 }
 
 _offload_lock_skip_bump() {
@@ -731,9 +750,15 @@ offload_archive() {
     return 1
   fi
 
-  # Safety-net age tracks upload time: touch the REMOTE object after verify.
-  if ! "$RCLONE_BIN" touch "$(rclone_remote_path "$base")"; then
+  # Safety-net age tracks upload time: touch REMOTE objects after verify.
+  # --no-create (-C): never invent a missing remote file.
+  if ! "$RCLONE_BIN" touch --no-create "$(rclone_remote_path "$base")"; then
     log_warn "rclone touch failed for ${base} (safety-net age may be off)"
+    _offload_fail_bump "rclone touch failed for ${base}"
+  fi
+  if ! "$RCLONE_BIN" touch --no-create "$(rclone_remote_path "${base}.sha256")"; then
+    log_warn "rclone touch failed for ${base}.sha256 (safety-net age may be off)"
+    _offload_fail_bump "rclone touch failed for ${base}.sha256"
   fi
 
   local uploaded_at
