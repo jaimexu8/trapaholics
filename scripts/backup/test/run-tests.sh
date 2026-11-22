@@ -18,6 +18,19 @@ if [[ "${BASH_VERSINFO[0]}" -lt 4 ]]; then
   exit 1
 fi
 
+# Prefer real flock (Homebrew util-linux is keg-only on macOS).
+REAL_FLOCK=""
+for candidate in \
+  /opt/homebrew/opt/util-linux/bin/flock \
+  /usr/local/opt/util-linux/bin/flock \
+  "$(command -v flock 2>/dev/null || true)"
+do
+  if [[ -n "$candidate" && -x "$candidate" ]]; then
+    REAL_FLOCK="$candidate"
+    break
+  fi
+done
+
 need_cmd() {
   command -v "$1" >/dev/null 2>&1 || { echo "missing required command: $1" >&2; exit 1; }
 }
@@ -50,15 +63,39 @@ assert_false() {
   fi
 }
 
+assert_file_contains() {
+  local desc="$1" file="$2" pattern="$3"
+  if [[ -f "$file" ]] && grep -qE "$pattern" "$file"; then
+    echo "  PASS: ${desc}"
+    PASS=$((PASS + 1))
+  else
+    echo "  FAIL: ${desc} (pattern '${pattern}' in ${file})"
+    FAIL=$((FAIL + 1))
+  fi
+}
+
+iso_from_epoch() {
+  local epoch="$1"
+  if date -u -d "@${epoch}" +%Y-%m-%dT%H:%M:%SZ >/dev/null 2>&1; then
+    date -u -d "@${epoch}" +%Y-%m-%dT%H:%M:%SZ
+  else
+    date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ
+  fi
+}
+
 # ---------------------------------------------------------------------------
-# Fixture: fake repo + stub bin dir
+# Fixture
 # ---------------------------------------------------------------------------
 
 setup_fixture() {
+  # Drop prior lib load so a fresh source picks up code changes mid-harness.
+  unset TRAPAHOLICS_BACKUP_LIB_LOADED
+
   FIX="$(mktemp -d -t trapaholics-backup-test.XXXXXX)"
   mkdir -p \
     "$FIX/repo/velocity" \
-    "$FIX/repo/survival/world" \
+    "$FIX/repo/survival/world/data" \
+    "$FIX/repo/survival/plugins/GriefPrevention/data" \
     "$FIX/repo/creative/world" \
     "$FIX/repo/config" \
     "$FIX/repo/scripts" \
@@ -67,56 +104,111 @@ setup_fixture() {
     "$FIX/state"
 
   echo "fake-compose" >"$FIX/repo/docker-compose.yml"
-  echo "MARIADB_ROOT_PASSWORD=test-secret" >"$FIX/repo/.env"
-  echo "DISCORD_WEBHOOK_URL=" >>"$FIX/repo/.env"
-  echo "world data" >"$FIX/repo/survival/world/level.dat"
+  cat >"$FIX/repo/.env" <<'EOF'
+MARIADB_ROOT_PASSWORD=test-secret
+DISCORD_WEBHOOK_URL=https://discord.test/webhook/fake
+EOF
+  echo "world-marker" >"$FIX/repo/survival/world/data/KEEP_ME"
+  echo "plugin-marker" >"$FIX/repo/survival/plugins/GriefPrevention/data/KEEP_ME"
   echo "creative data" >"$FIX/repo/creative/world/level.dat"
   echo "proxy" >"$FIX/repo/velocity/velocity.toml"
+  # libraries should be excludable via anchored path without touching world/data
+  mkdir -p "$FIX/repo/survival/libraries"
+  echo "lib" >"$FIX/repo/survival/libraries/skip.jar"
   chmod 700 "$FIX/repo/backups"
 
-  # Point backup.conf at this fixture via env overrides (lib respects these).
-  export BACKUP_CONF="${SCRIPTS}/backup.conf"
-  export REPO_ROOT="$FIX/repo"
-  export BACKUP_DIR="$FIX/repo/backups"
-  export ENV_FILE="$FIX/repo/.env"
-  export STAGING_DIR="$FIX/repo/backups/.staging"
+  # Per-fixture conf so overrides are explicit and take effect.
+  cat >"${FIX}/backup.conf" <<EOF
+REPO_ROOT="${FIX}/repo"
+BACKUP_SUBDIR="backups"
+SAFETY_MARGIN_BYTES=0
+BACKUP_SIZE_MULTIPLIER="1.0"
+RCLONE_REMOTE="gdrive-crypt:"
+RCLONE_BWLIMIT=""
+OFFLOAD_AGE_HOURS=24
+PRUNE_AGE_DAYS=30
+PRUNE_SAFETY_MIN_AGE_DAYS=31
+OFFLOAD_FAIL_ALERT_THRESHOLD=99
+PAPER_CONTAINERS="survival creative"
+MARIADB_CONTAINER="mariadb"
+MARIADB_DATABASE="luckperms"
+DOCKER_TIMEOUT_SEC=60
+OFFLOAD_LOCK_WAIT_SEC=2
+BACKUP_EXCLUDES="survival/libraries survival/cache survival/versions"
+BACKUP_INCLUDE_PATHS="velocity survival creative config scripts docker-compose.yml .env"
+LOCK_NAME=".backup.lock"
+OFFLOAD_LOCK_NAME=".offload.lock"
+PRUNE_LOCK_NAME=".prune.lock"
+UPLOADED_LOG_NAME=".uploaded.log"
+OFFLOAD_FAIL_COUNT_NAME=".offload-fail-count"
+EOF
+
+  export BACKUP_CONF="${FIX}/backup.conf"
+  export REPO_ROOT="${FIX}/repo"
+  export BACKUP_DIR="${FIX}/repo/backups"
+  export ENV_FILE="${FIX}/repo/.env"
+  export STAGING_DIR="${FIX}/repo/backups/.staging"
   export SAFETY_MARGIN_BYTES=0
   export BACKUP_SIZE_MULTIPLIER="1.0"
+  export RCLONE_REMOTE="gdrive-crypt:"
+  export RCLONE_BWLIMIT=""
   export OFFLOAD_AGE_HOURS=24
   export PRUNE_AGE_DAYS=30
   export OFFLOAD_FAIL_ALERT_THRESHOLD=99
-  export RCLONE_REMOTE="gdrive-crypt:"
-  export RCLONE_BWLIMIT=""
+  export OFFLOAD_LOCK_WAIT_SEC=2
+  export DOCKER_TIMEOUT_SEC=5
   export PAPER_CONTAINERS="survival creative"
   export MARIADB_CONTAINER="mariadb"
   export MARIADB_DATABASE="luckperms"
+  export BACKUP_EXCLUDES="survival/libraries survival/cache survival/versions"
+  export BACKUP_INCLUDE_PATHS="velocity survival creative config scripts docker-compose.yml .env"
 
-  # Stub tools on PATH
   export PATH="${FIX}/stubs:${PATH}"
   export DOCKER_BIN="${FIX}/stubs/docker"
   export RCLONE_BIN="${FIX}/stubs/rclone"
   export DF_BIN="${FIX}/stubs/df"
   export CURL_BIN="${FIX}/stubs/curl"
+  export TIMEOUT_BIN="${FIX}/stubs/timeout"
+  if [[ -n "$REAL_FLOCK" ]]; then
+    export FLOCK_BIN="$REAL_FLOCK"
+  else
+    export FLOCK_BIN="${FIX}/stubs/flock"
+  fi
 
-  # flock stub: ignore lock args, run the command or succeed for fd mode
-  cat >"${FIX}/stubs/flock" <<'EOF'
+  # timeout stub: ignore duration, run the rest
+  cat >"${FIX}/stubs/timeout" <<'EOS'
 #!/usr/bin/env bash
-# Minimal flock stub for tests (no real locking).
+shift
+exec "$@"
+EOS
+  chmod +x "${FIX}/stubs/timeout"
+
+  # flock stub only if real flock unavailable
+  if [[ -z "$REAL_FLOCK" ]]; then
+    cat >"${FIX}/stubs/flock" <<'EOS'
+#!/usr/bin/env bash
 set -e
+wait_sec=""
+nonblock=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -n|-x|-s|-u|-e) shift ;;
+    -n) nonblock=1; shift ;;
+    -w) wait_sec="$2"; shift 2 ;;
+    -x|-s|-u|-e) shift ;;
     -c) shift; exec bash -c "$1" ;;
-    -w) shift 2 ;;
-    [0-9]*) shift; exit 0 ;;  # fd mode: caller already has the body
+    [0-9]*)
+      # fd mode — pretend success
+      exit 0
+      ;;
     *) exec "$@" ;;
   esac
 done
 exit 0
-EOF
-  chmod +x "${FIX}/stubs/flock"
+EOS
+    chmod +x "${FIX}/stubs/flock"
+  fi
 
-  # docker stub: track rcon commands; fake inspect/dump
+  # docker stub
   cat >"${FIX}/stubs/docker" <<EOS
 #!/usr/bin/env bash
 set -e
@@ -127,20 +219,37 @@ case "\$1" in
   inspect)
     name="\${@: -1}"
     if [[ -f "\$STATE_DIR/docker.down" ]] && grep -qx "\$name" "\$STATE_DIR/docker.down"; then
-      echo "false"
-      exit 0
+      echo "false"; exit 0
     fi
     echo "true"
     ;;
   exec)
-    container="\$2"
-    shift 2
+    # docker exec [-e KEY=VAL ...] CONTAINER CMD...
+    shift
+    while [[ "\$1" == -* ]]; do
+      if [[ "\$1" == "-e" ]]; then
+        shift 2
+      else
+        shift
+      fi
+    done
+    container="\$1"
+    shift
     if [[ "\$1" == "rcon-cli" ]]; then
       shift
-      echo "\$container rcon \$*" >>"\$STATE_DIR/rcon.log"
+      cmd="\$*"
+      echo "\$container rcon \$cmd" >>"\$STATE_DIR/rcon.log"
+      if [[ -f "\$STATE_DIR/rcon.fail" ]] && grep -qx "\$cmd" "\$STATE_DIR/rcon.fail"; then
+        echo "rcon forced failure: \$cmd" >&2
+        exit 1
+      fi
       exit 0
     fi
     if [[ "\$1" == "mariadb-dump" ]]; then
+      if [[ -f "\$STATE_DIR/dump.fail" ]]; then
+        echo "mariadb-dump forced failure" >&2
+        exit 1
+      fi
       echo "-- fake dump of luckperms"
       echo "CREATE DATABASE luckperms;"
       exit 0
@@ -152,18 +261,15 @@ esac
 EOS
   chmod +x "${FIX}/stubs/docker"
 
-  # df stub: reads free KB from state file (default huge)
   echo "999999999" >"${FIX}/state/df_avail_kb"
   cat >"${FIX}/stubs/df" <<EOF
 #!/usr/bin/env bash
-# Emulate: df -Pk PATH → avail in 1K blocks in column 4
 avail=\$(cat "${FIX}/state/df_avail_kb")
 echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
 echo "/dev/test 1000000000 1 \${avail} 1% /"
 EOF
   chmod +x "${FIX}/stubs/df"
 
-  # rclone stub: controllable copy/cryptcheck/delete behaviour
   echo "ok" >"${FIX}/state/rclone_copy"
   echo "ok" >"${FIX}/state/rclone_cryptcheck"
   echo "ok" >"${FIX}/state/rclone_deletefile"
@@ -173,43 +279,41 @@ EOF
 #!/usr/bin/env bash
 set -e
 echo "\$*" >>"${FIX}/state/rclone.log"
-cmd="\$1"
-shift || true
+cmd="\$1"; shift || true
 case "\$cmd" in
   copy)
     src="\$1"
     if [[ "\$(cat "${FIX}/state/rclone_copy")" != "ok" ]]; then
-      echo "rclone copy failed (stub)" >&2
-      exit 1
+      echo "rclone copy failed (stub)" >&2; exit 1
     fi
     cp -a "\$src" "${FIX}/state/remote/\$(basename "\$src")"
     ;;
   cryptcheck)
     src="\$1"
     if [[ "\$(cat "${FIX}/state/rclone_cryptcheck")" != "ok" ]]; then
-      echo "rclone cryptcheck failed (stub)" >&2
-      exit 1
+      echo "rclone cryptcheck failed (stub)" >&2; exit 1
     fi
     base=\$(basename "\$src")
-    if [[ ! -f "${FIX}/state/remote/\$base" ]]; then
-      echo "cryptcheck: remote missing \$base" >&2
-      exit 1
-    fi
+    [[ -f "${FIX}/state/remote/\$base" ]] || { echo "cryptcheck: remote missing"; exit 1; }
     ;;
   deletefile)
     remote="\$1"
-    if [[ "\$(cat "${FIX}/state/rclone_deletefile")" != "ok" ]]; then
-      echo "rclone deletefile failed (stub)" >&2
-      exit 1
-    fi
     base=\${remote##*:}
+    if [[ "\$(cat "${FIX}/state/rclone_deletefile")" == "notfound" ]]; then
+      echo "directory not found" >&2; exit 1
+    fi
+    if [[ "\$(cat "${FIX}/state/rclone_deletefile")" != "ok" ]]; then
+      echo "rclone deletefile failed (stub)" >&2; exit 1
+    fi
+    if [[ ! -f "${FIX}/state/remote/\$base" ]]; then
+      echo "object not found" >&2; exit 1
+    fi
     rm -f "${FIX}/state/remote/\$base"
     echo "\$base" >>"${FIX}/state/rclone_deleted.log"
     ;;
   delete)
     if [[ "\$(cat "${FIX}/state/rclone_delete")" != "ok" ]]; then
-      echo "rclone delete failed (stub)" >&2
-      exit 1
+      echo "rclone delete failed (stub)" >&2; exit 1
     fi
     echo "delete \$*" >>"${FIX}/state/rclone_deleted.log"
     ;;
@@ -218,28 +322,28 @@ esac
 EOF
   chmod +x "${FIX}/stubs/rclone"
 
-  cat >"${FIX}/stubs/curl" <<'EOF'
+  # curl stub: log config+payload; succeed
+  cat >"${FIX}/stubs/curl" <<EOF
 #!/usr/bin/env bash
+mkdir -p "${FIX}/state"
+echo "curl \$*" >>"${FIX}/state/curl.log"
+# Read -K - config from stdin when present; drain stdin
+if [[ "\$*" == *-K* ]]; then
+  cat >>"${FIX}/state/curl.conf" || true
+fi
 exit 0
 EOF
   chmod +x "${FIX}/stubs/curl"
 
   # shellcheck source=../lib.sh disable=SC1091
   source "${SCRIPTS}/lib.sh"
-  # Force config load then overlay fixture paths (backup.conf may reset REPO_ROOT).
   backup_load_config
-  REPO_ROOT="$FIX/repo"
-  BACKUP_DIR="$FIX/repo/backups"
-  ENV_FILE="$FIX/repo/.env"
-  STAGING_DIR="$FIX/repo/backups/.staging"
-  UPLOADED_LOG="${BACKUP_DIR}/.uploaded.log"
-  SAFETY_MARGIN_BYTES=0
-  BACKUP_SIZE_MULTIPLIER="1.0"
+  # Paths from conf/env should already be set; re-pin tools.
   DOCKER_BIN="${FIX}/stubs/docker"
   RCLONE_BIN="${FIX}/stubs/rclone"
   DF_BIN="${FIX}/stubs/df"
   CURL_BIN="${FIX}/stubs/curl"
-  RCLONE_BWLIMIT=""
+  TIMEOUT_BIN="${FIX}/stubs/timeout"
   backup_ensure_dirs
 }
 
@@ -254,111 +358,109 @@ make_fake_archive() {
   local path="${BACKUP_DIR}/${name}"
   echo "fake-archive-body-${name}" | zstd -q -o "$path"
   chmod 600 "$path"
-  write_sha256 "$path"
-  # Optionally set mtime via second arg (epoch)
-  if [[ -n "${2:-}" ]]; then
-    if touch -d "@${2}" "$path" 2>/dev/null; then
-      :
-    else
-      # BSD touch
-      touch -t "$(date -r "$2" +%Y%m%d%H%M.%S)" "$path" 2>/dev/null || true
-    fi
+  local sum
+  if command -v sha256sum >/dev/null 2>&1; then
+    sum="$(sha256sum "$path" | awk '{print $1}')"
+  else
+    sum="$(shasum -a 256 "$path" | awk '{print $1}')"
   fi
+  printf '%s  %s\n' "$sum" "$name" >"${path}.sha256"
+  chmod 600 "${path}.sha256"
   printf '%s' "$path"
+}
+
+run_backup_sh() {
+  BACKUP_CONF="${FIX}/backup.conf" \
+    REPO_ROOT="${FIX}/repo" \
+    BACKUP_DIR="${FIX}/repo/backups" \
+    ENV_FILE="${FIX}/repo/.env" \
+    SAFETY_MARGIN_BYTES=0 \
+    BACKUP_SIZE_MULTIPLIER="1.0" \
+    RCLONE_REMOTE="gdrive-crypt:" \
+    RCLONE_BWLIMIT="" \
+    OFFLOAD_LOCK_WAIT_SEC=2 \
+    DOCKER_BIN="${FIX}/stubs/docker" \
+    RCLONE_BIN="${FIX}/stubs/rclone" \
+    DF_BIN="${FIX}/stubs/df" \
+    CURL_BIN="${FIX}/stubs/curl" \
+    TIMEOUT_BIN="${FIX}/stubs/timeout" \
+    FLOCK_BIN="${FLOCK_BIN}" \
+    PATH="${FIX}/stubs:${PATH}" \
+    "${SCRIPTS}/backup.sh"
 }
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
-test_a_normal_backup() {
-  echo "TEST (a): normal backup produces archive + sha256 and calls save-off/save-on"
+test_a_normal_backup_keeps_world_data() {
+  echo "TEST (a): normal backup + save-off/on; world/data and plugins/*/data retained"
   setup_fixture
-  rm -f "${FIX}/state/rcon.log"
-
   local archive
   paper_save_off
   archive="$(backup_create_archive)"
   paper_save_on
 
-  assert_true "archive file exists" test -f "$archive"
-  assert_true "sha256 file exists" test -f "${archive}.sha256"
-  assert_true "archive mode is 600" bash -c "[[ \$(stat -f '%Lp' '$archive' 2>/dev/null || stat -c '%a' '$archive') == 600 ]]"
-  assert_true "rcon save-off called" grep -q 'save-off' "${FIX}/state/rcon.log"
-  assert_true "rcon save-all flush called" grep -q 'save-all flush' "${FIX}/state/rcon.log"
-  assert_true "rcon save-on called" grep -q 'save-on' "${FIX}/state/rcon.log"
-  assert_true "zstd archive verifies" zstd -t "$archive"
+  assert_true "archive exists" test -f "$archive"
+  assert_true "sha256 exists" test -f "${archive}.sha256"
+  assert_true "save-off logged" grep -q 'save-off' "${FIX}/state/rcon.log"
+  assert_true "save-all flush logged" grep -q 'save-all flush' "${FIX}/state/rcon.log"
+  assert_true "save-on logged" grep -q 'save-on' "${FIX}/state/rcon.log"
+
+  local listing
+  listing="$(zstd -dc "$archive" | tar -t)"
+  assert_true "world/data kept in archive" grep -q 'survival/world/data/KEEP_ME' <<<"$listing"
+  assert_true "plugins/*/data kept in archive" grep -q 'survival/plugins/GriefPrevention/data/KEEP_ME' <<<"$listing"
+  assert_false "anchored libraries excluded" grep -q 'survival/libraries/skip.jar' <<<"$listing"
 
   teardown_fixture
 }
 
-test_b_save_on_on_failure() {
-  echo "TEST (b): save-on still runs when archiving fails"
+test_b_flush_fail_still_save_on_via_backup_sh() {
+  echo "TEST (b): save-all flush failure still restores save-on via backup.sh EXIT trap"
   setup_fixture
-  rm -f "${FIX}/state/rcon.log"
+  echo "save-all flush" >"${FIX}/state/rcon.fail"
+  # Plenty of space so we reach paper_save_off
+  echo "999999999" >"${FIX}/state/df_avail_kb"
 
-  # Break zstd to force archive failure after save-off
-  export ZSTD_BIN="${FIX}/stubs/zstd-fail"
-  cat >"$ZSTD_BIN" <<'EOF'
-#!/usr/bin/env bash
-echo "zstd forced failure" >&2
-exit 1
-EOF
-  chmod +x "$ZSTD_BIN"
-
-  paper_save_off
   set +e
-  backup_create_archive >/dev/null 2>&1
+  run_backup_sh >/dev/null 2>"${FIX}/state/backup.err"
   local rc=$?
   set -e
-  paper_save_on
-  ZSTD_BIN=zstd
 
-  assert_true "archive creation failed" test "$rc" -ne 0
+  assert_true "backup.sh failed" test "$rc" -ne 0
   assert_true "save-off was issued" grep -q 'save-off' "${FIX}/state/rcon.log"
-  assert_true "save-on was still issued" grep -q 'save-on' "${FIX}/state/rcon.log"
-  assert_false "no archive left behind" bash -c "ls '${BACKUP_DIR}'/trapaholics-*.tar.zst >/dev/null 2>&1"
+  assert_true "save-on restored via trap" grep -q 'save-on' "${FIX}/state/rcon.log"
+  assert_file_contains "discord alert attempted" "${FIX}/state/curl.log" 'curl'
 
   teardown_fixture
 }
 
-test_c_low_space_path() {
-  echo "TEST (c): low-space offloads oldest until room; aborts without delete when upload fails"
+test_c_dump_failure_fails_and_alerts() {
+  echo "TEST (c): mariadb-dump failure fails the backup and alerts"
   setup_fixture
+  touch "${FIX}/state/dump.fail"
+  echo "999999999" >"${FIX}/state/df_avail_kb"
 
+  set +e
+  run_backup_sh >/dev/null 2>"${FIX}/state/backup.err"
+  local rc=$?
+  set -e
+
+  assert_true "backup.sh failed on dump" test "$rc" -ne 0
+  assert_true "save-on still ran" grep -q 'save-on' "${FIX}/state/rcon.log"
+  assert_file_contains "discord alert on dump failure" "${FIX}/state/curl.log" 'curl'
+  assert_false "no final archive" bash -c "ls '${BACKUP_DIR}'/trapaholics-*.tar.zst >/dev/null 2>&1"
+
+  teardown_fixture
+}
+
+test_d_low_space_abort_keeps_newer_and_alerts() {
+  echo "TEST (d): low-space abort keeps newer archive and alerts"
+  setup_fixture
   local old new
   old="$(make_fake_archive 'trapaholics-2026-01-01_0000.tar.zst')"
   new="$(make_fake_archive 'trapaholics-2026-01-02_0000.tar.zst')"
-
-  # df reports KB. Start with 0 available so free < needed (newest size, margin 0),
-  # then report plenty of space after the first offload attempt.
-  cat >"${FIX}/stubs/df" <<EOF
-#!/usr/bin/env bash
-count_file="${FIX}/state/df_calls"
-n=\$(( \$(cat "\$count_file" 2>/dev/null || echo 0) + 1 ))
-echo "\$n" >"\$count_file"
-# First df call = initial space check (too low). Later calls = after offload.
-if [[ "\$n" -le 1 ]]; then
-  avail=0
-else
-  avail=999999999
-fi
-echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
-echo "/dev/test 1000000000 1 \${avail} 1% /"
-EOF
-  chmod +x "${FIX}/stubs/df"
-
-  assert_true "ensure_space succeeds after offloading oldest" backup_ensure_space
-  assert_false "oldest archive removed after verified offload" test -f "$old"
-  assert_true "newer archive still local" test -f "$new"
-  assert_true "oldest present on remote stub" test -f "${FIX}/state/remote/$(basename "$old")"
-  assert_true "uploaded log has oldest" grep -q "$(basename "$old")" "$UPLOADED_LOG"
-
-  # Reset: upload failure must not delete
-  teardown_fixture
-  setup_fixture
-  old="$(make_fake_archive 'trapaholics-2026-01-01_0000.tar.zst')"
-  make_fake_archive 'trapaholics-2026-01-02_0000.tar.zst' >/dev/null
   echo "fail" >"${FIX}/state/rclone_copy"
   cat >"${FIX}/stubs/df" <<EOF
 #!/usr/bin/env bash
@@ -367,126 +469,232 @@ echo "/dev/test 1000000000 1 0 1% /"
 EOF
   chmod +x "${FIX}/stubs/df"
 
-  assert_false "ensure_space aborts when offload fails" backup_ensure_space
-  assert_true "local oldest kept after failed upload (B5)" test -f "$old"
-  assert_false "oldest not on remote" test -f "${FIX}/state/remote/$(basename "$old")"
+  assert_false "ensure_space aborts" backup_ensure_space
+  assert_true "oldest kept after failed upload" test -f "$old"
+  assert_true "newer kept after abort" test -f "$new"
+  assert_file_contains "low-disk discord alert" "${FIX}/state/curl.log" 'curl'
 
   teardown_fixture
 }
 
-test_d_offload_cryptcheck_gate() {
-  echo "TEST (d): offload deletes only after cryptcheck passes; keeps on failure"
+test_e_offload_cryptcheck_and_partial_skip() {
+  echo "TEST (e): cryptcheck gate; .partial never offloaded; sha256 required"
   setup_fixture
   local arch
   arch="$(make_fake_archive 'trapaholics-2026-03-01_1200.tar.zst')"
+  assert_true "offload succeeds" offload_archive "$arch"
+  assert_false "local deleted after cryptcheck" test -f "$arch"
 
-  # Success path
-  assert_true "offload_archive succeeds" offload_archive "$arch"
-  assert_false "local archive deleted after cryptcheck" test -f "$arch"
-  assert_false "local sha256 deleted after cryptcheck" test -f "${arch}.sha256"
-  assert_true "remote has archive" test -f "${FIX}/state/remote/$(basename "$arch")"
-  assert_true "uploaded log updated" grep -q "$(basename "$arch")" "$UPLOADED_LOG"
-
-  # Failure path: copy ok, cryptcheck fails → keep local
   arch="$(make_fake_archive 'trapaholics-2026-03-02_1200.tar.zst')"
-  echo "ok" >"${FIX}/state/rclone_copy"
   echo "fail" >"${FIX}/state/rclone_cryptcheck"
-  assert_false "offload_archive fails on cryptcheck" offload_archive "$arch"
-  assert_true "local archive kept when cryptcheck fails" test -f "$arch"
-  assert_true "local sha256 kept when cryptcheck fails" test -f "${arch}.sha256"
+  assert_false "cryptcheck failure" offload_archive "$arch"
+  assert_true "kept on cryptcheck fail" test -f "$arch"
+
+  # .partial must not be offloaded
+  echo "partial-body" | zstd -q -o "${BACKUP_DIR}/trapaholics-2026-03-03_1200.tar.zst.partial"
+  assert_false "partial skipped" offload_archive "${BACKUP_DIR}/trapaholics-2026-03-03_1200.tar.zst.partial"
+  assert_true "partial still present" test -f "${BACKUP_DIR}/trapaholics-2026-03-03_1200.tar.zst.partial"
+
+  # missing sha256 refused
+  echo "nosum" | zstd -q -o "${BACKUP_DIR}/trapaholics-2026-03-04_1200.tar.zst"
+  assert_false "missing sha256 refused" offload_archive "${BACKUP_DIR}/trapaholics-2026-03-04_1200.tar.zst"
 
   teardown_fixture
 }
 
-test_e_prune_age() {
-  echo "TEST (e): pruning removes only entries ≥ 30 days old"
+test_f_prune_boundaries_and_malformed() {
+  echo "TEST (f): prune 29d23h kept, 30d00h deleted; malformed skipped; not-found ok"
   setup_fixture
 
-  # Put two remote files
-  echo "old" >"${FIX}/state/remote/trapaholics-old.tar.zst"
-  echo "new" >"${FIX}/state/remote/trapaholics-new.tar.zst"
+  echo "old" >"${FIX}/state/remote/trapaholics-2020-01-01_0000.tar.zst"
+  echo "edge" >"${FIX}/state/remote/trapaholics-2020-01-02_0000.tar.zst"
+  echo "new" >"${FIX}/state/remote/trapaholics-2020-01-03_0000.tar.zst"
 
-  local now old_iso new_iso
+  local now
   now="$(date -u +%s)"
-  # 31 days ago and 1 day ago
-  if date -u -d "@$((now - 31*86400))" +%Y-%m-%dT%H:%M:%SZ >/dev/null 2>&1; then
-    old_iso="$(date -u -d "@$((now - 31*86400))" +%Y-%m-%dT%H:%M:%SZ)"
-    new_iso="$(date -u -d "@$((now - 1*86400))" +%Y-%m-%dT%H:%M:%SZ)"
-  else
-    old_iso="$(date -u -r "$((now - 31*86400))" +%Y-%m-%dT%H:%M:%SZ)"
-    new_iso="$(date -u -r "$((now - 1*86400))" +%Y-%m-%dT%H:%M:%SZ)"
-  fi
+  local iso_30 iso_29 iso_1
+  # Exactly 30 days ago → eligible (<= cutoff)
+  iso_30="$(iso_from_epoch $((now - 30 * 86400)))"
+  # 29d23h ago → keep
+  iso_29="$(iso_from_epoch $((now - 29 * 86400 - 23 * 3600)))"
+  iso_1="$(iso_from_epoch $((now - 86400)))"
 
   cat >"$UPLOADED_LOG" <<EOF
-trapaholics-old.tar.zst ${old_iso}
-trapaholics-new.tar.zst ${new_iso}
+trapaholics-2020-01-01_0000.tar.zst ${iso_30}
+trapaholics-2020-01-02_0000.tar.zst ${iso_29}
+trapaholics-2020-01-03_0000.tar.zst ${iso_1}
+evil-file.tar.zst ${iso_30}
+not-a-backup.txt ${iso_30}
 EOF
 
   prune_drive_from_log
 
-  assert_false "old remote file deleted" test -f "${FIX}/state/remote/trapaholics-old.tar.zst"
-  assert_true "new remote file kept" test -f "${FIX}/state/remote/trapaholics-new.tar.zst"
-  assert_false "old log line removed" grep -q 'trapaholics-old.tar.zst' "$UPLOADED_LOG"
-  assert_true "new log line kept" grep -q 'trapaholics-new.tar.zst' "$UPLOADED_LOG"
+  assert_false "30d00h deleted" test -f "${FIX}/state/remote/trapaholics-2020-01-01_0000.tar.zst"
+  assert_true "29d23h kept" test -f "${FIX}/state/remote/trapaholics-2020-01-02_0000.tar.zst"
+  assert_true "1d kept" test -f "${FIX}/state/remote/trapaholics-2020-01-03_0000.tar.zst"
+  assert_false "30d line removed" grep -q 'trapaholics-2020-01-01_0000.tar.zst' "$UPLOADED_LOG"
+  assert_true "29d23h line kept" grep -q 'trapaholics-2020-01-02_0000.tar.zst' "$UPLOADED_LOG"
+  assert_true "malformed evil-file kept in log" grep -q 'evil-file.tar.zst' "$UPLOADED_LOG"
+  assert_true "malformed not-a-backup kept in log" grep -q 'not-a-backup.txt' "$UPLOADED_LOG"
 
-  # Safety net still invoked by prune-drive.sh — call directly
-  assert_true "safety-net prune runs" prune_drive_safety_net
-  assert_true "safety-net logged" grep -q 'delete' "${FIX}/state/rclone_deleted.log"
+  # not-found treated as success
+  echo "trapaholics-2019-01-01_0000.tar.zst ${iso_30}" >>"$UPLOADED_LOG"
+  echo "notfound" >"${FIX}/state/rclone_deletefile"
+  prune_drive_from_log
+  assert_false "not-found drops log line" grep -q 'trapaholics-2019-01-01_0000.tar.zst' "$UPLOADED_LOG"
 
   teardown_fixture
 }
 
-test_backup_sh_trap_integration() {
-  echo "TEST (extra): backup.sh EXIT trap restores save-on when zstd fails"
+test_g_rclone_remote_validation() {
+  echo "TEST (g): empty/invalid RCLONE_REMOTE refused"
   setup_fixture
-  # Use a broken zstd on PATH for the real script invocation
-  cat >"${FIX}/stubs/zstd" <<'EOF'
-#!/usr/bin/env bash
-echo "forced zstd fail" >&2
-exit 1
-EOF
-  chmod +x "${FIX}/stubs/zstd"
+
+  RCLONE_REMOTE=""
+  export RCLONE_REMOTE
+  assert_false "empty remote refused" backup_validate_rclone_remote
+
+  RCLONE_REMOTE="gdrive:"
+  export RCLONE_REMOTE
+  assert_false "gdrive: refused" backup_validate_rclone_remote
+
+  RCLONE_REMOTE="gdrive-crypt"
+  export RCLONE_REMOTE
+  assert_false "missing colon refused" backup_validate_rclone_remote
+
+  RCLONE_REMOTE="gdrive-crypt:"
+  export RCLONE_REMOTE
+  assert_true "gdrive-crypt: accepted" backup_validate_rclone_remote
+
+  RCLONE_REMOTE="gdrive-crypt:mc-backups"
+  export RCLONE_REMOTE
+  assert_true "gdrive-crypt:subpath accepted" backup_validate_rclone_remote
+
+  teardown_fixture
+}
+
+test_h_same_minute_and_partial_cleanup() {
+  echo "TEST (h): same-minute rerun does not delete existing archive; failure only removes .partial"
+  setup_fixture
+  local stamp name archive
+  stamp="$("$DATE_BIN" -u '+%Y-%m-%d_%H%M')"
+  name="trapaholics-${stamp}.tar.zst"
+  archive="${BACKUP_DIR}/${name}"
+  echo "existing" | zstd -q -o "$archive"
+  chmod 600 "$archive"
+  local sum
+  sum="$(sha256_file "$archive")"
+  printf '%s  %s\n' "$sum" "$name" >"${archive}.sha256"
 
   set +e
-  # Override REPO_ROOT via a temporary conf
-  cat >"${FIX}/backup.conf" <<EOF
-REPO_ROOT="${FIX}/repo"
-BACKUP_SUBDIR="backups"
-SAFETY_MARGIN_BYTES=0
-BACKUP_SIZE_MULTIPLIER="1.0"
-RCLONE_REMOTE="gdrive-crypt:"
-RCLONE_BWLIMIT=""
-OFFLOAD_AGE_HOURS=24
-PRUNE_AGE_DAYS=30
-OFFLOAD_FAIL_ALERT_THRESHOLD=99
-PAPER_CONTAINERS="survival creative"
-MARIADB_CONTAINER="mariadb"
-MARIADB_DATABASE="luckperms"
-BACKUP_EXCLUDES="libraries cache versions"
-BACKUP_INCLUDE_PATHS="velocity survival creative config scripts docker-compose.yml .env"
-EOF
-  # df with plenty of space
-  echo "999999999" >"${FIX}/state/df_avail_kb"
-  cat >"${FIX}/stubs/df" <<EOF
-#!/usr/bin/env bash
-echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
-echo "/dev/test 1000000000 1 999999999 1% /"
-EOF
-  chmod +x "${FIX}/stubs/df"
-
-  BACKUP_CONF="${FIX}/backup.conf" \
-    DOCKER_BIN="${FIX}/stubs/docker" \
-    RCLONE_BIN="${FIX}/stubs/rclone" \
-    DF_BIN="${FIX}/stubs/df" \
-    CURL_BIN="${FIX}/stubs/curl" \
-    PATH="${FIX}/stubs:${PATH}" \
-    "${SCRIPTS}/backup.sh" >/dev/null 2>&1
+  backup_create_archive >/dev/null 2>&1
   local rc=$?
   set -e
 
-  assert_true "backup.sh exited non-zero" test "$rc" -ne 0
-  assert_true "save-on via EXIT trap" grep -q 'save-on' "${FIX}/state/rcon.log"
+  assert_true "same-minute create failed" test "$rc" -ne 0
+  assert_true "existing archive intact" test -f "$archive"
+  assert_false "no leftover partial" bash -c "ls '${BACKUP_DIR}'/*.partial >/dev/null 2>&1"
 
+  # Force zstd failure mid-create with no pre-existing archive
+  rm -f "$archive" "${archive}.sha256"
+  export ZSTD_BIN="${FIX}/stubs/zstd-fail"
+  cat >"$ZSTD_BIN" <<'EOF'
+#!/usr/bin/env bash
+echo "zstd fail" >&2
+exit 1
+EOF
+  chmod +x "$ZSTD_BIN"
+  set +e
+  backup_create_archive >/dev/null 2>&1
+  rc=$?
+  set -e
+  unset ZSTD_BIN
+  ZSTD_BIN=zstd
+
+  assert_true "create failed on zstd" test "$rc" -ne 0
+  assert_false "partial cleaned up" bash -c "ls '${BACKUP_DIR}'/*.partial >/dev/null 2>&1"
+  assert_false "no final archive from failed run" bash -c "ls '${BACKUP_DIR}'/trapaholics-*.tar.zst >/dev/null 2>&1"
+
+  teardown_fixture
+}
+
+test_i_locking() {
+  echo "TEST (i): real flock serialises offload lock (or stub documents skip)"
+  setup_fixture
+  if [[ -z "$REAL_FLOCK" ]]; then
+    echo "  SKIP: no real flock on PATH (install util-linux)"
+    PASS=$((PASS + 1))
+    teardown_fixture
+    return 0
+  fi
+
+  # Hold offload lock in background, then ensure acquire_offload_lock 0 fails+alerts
+  (
+    exec 201>"$OFFLOAD_LOCK_FILE"
+    "$REAL_FLOCK" 201
+    sleep 5
+  ) &
+  local holder=$!
+  sleep 0.3
+
+  assert_false "non-blocking acquire fails while held" acquire_offload_lock 0
+  assert_file_contains "lock-held alert" "${FIX}/state/curl.log" 'curl'
+
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+
+  assert_true "acquire succeeds after release" acquire_offload_lock 0
+
+  teardown_fixture
+}
+
+test_j_env_overrides_take_effect() {
+  echo "TEST (j): exported tunable overrides take effect after backup_load_config"
+  setup_fixture
+  export SAFETY_MARGIN_BYTES=12345
+  export PRUNE_AGE_DAYS=7
+  unset TRAPAHOLICS_BACKUP_LIB_LOADED
+  # shellcheck source=../lib.sh disable=SC1091
+  source "${SCRIPTS}/lib.sh"
+  backup_load_config
+  assert_true "SAFETY_MARGIN_BYTES override" test "$SAFETY_MARGIN_BYTES" -eq 12345
+  assert_true "PRUNE_AGE_DAYS override" test "$PRUNE_AGE_DAYS" -eq 7
+  teardown_fixture
+}
+
+test_k_webhook_warning_at_startup() {
+  echo "TEST (k): missing webhook warned at startup"
+  setup_fixture
+  cat >"$ENV_FILE" <<'EOF'
+MARIADB_ROOT_PASSWORD=test-secret
+DISCORD_WEBHOOK_URL=
+EOF
+  local out
+  out="$(backup_warn_missing_webhook 2>&1)"
+  assert_true "startup warns about missing webhook" grep -q 'DISCORD_WEBHOOK_URL unset' <<<"$out"
+  teardown_fixture
+}
+
+test_l_low_space_success_offloads_oldest_only() {
+  echo "TEST (l): low-space success offloads oldest only"
+  setup_fixture
+  local old new
+  old="$(make_fake_archive 'trapaholics-2026-01-01_0000.tar.zst')"
+  new="$(make_fake_archive 'trapaholics-2026-01-02_0000.tar.zst')"
+  cat >"${FIX}/stubs/df" <<EOF
+#!/usr/bin/env bash
+count_file="${FIX}/state/df_calls"
+n=\$(( \$(cat "\$count_file" 2>/dev/null || echo 0) + 1 ))
+echo "\$n" >"\$count_file"
+if [[ "\$n" -le 1 ]]; then avail=0; else avail=999999999; fi
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "/dev/test 1000000000 1 \${avail} 1% /"
+EOF
+  chmod +x "${FIX}/stubs/df"
+
+  assert_true "ensure_space succeeds" backup_ensure_space
+  assert_false "oldest removed" test -f "$old"
+  assert_true "newer kept" test -f "$new"
   teardown_fixture
 }
 
@@ -496,13 +704,20 @@ EOF
 
 echo "=== trapaholics backup test harness ==="
 echo "ROOT=${ROOT}"
+echo "REAL_FLOCK=${REAL_FLOCK:-none}"
 
-test_a_normal_backup
-test_b_save_on_on_failure
-test_c_low_space_path
-test_d_offload_cryptcheck_gate
-test_e_prune_age
-test_backup_sh_trap_integration
+test_a_normal_backup_keeps_world_data
+test_b_flush_fail_still_save_on_via_backup_sh
+test_c_dump_failure_fails_and_alerts
+test_d_low_space_abort_keeps_newer_and_alerts
+test_e_offload_cryptcheck_and_partial_skip
+test_f_prune_boundaries_and_malformed
+test_g_rclone_remote_validation
+test_h_same_minute_and_partial_cleanup
+test_i_locking
+test_j_env_overrides_take_effect
+test_k_webhook_warning_at_startup
+test_l_low_space_success_offloads_oldest_only
 
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed"

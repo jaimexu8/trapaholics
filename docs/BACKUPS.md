@@ -3,11 +3,13 @@
 Automatic full-network backups (ARCHITECTURE.md §11). Scripts live under
 `scripts/backup/`; systemd units under `systemd/`.
 
-| Script | Timer | What it does |
+| Script | Timer (UTC) | What it does |
 |---|---|---|
-| `backup.sh` | every 4 h (00/04/08/12/16/20) | Consistent archive → `backups/trapaholics-YYYY-MM-DD_HHMM.tar.zst` + `.sha256` |
-| `offload.sh` | hourly | Upload archives older than 24 h to encrypted Drive, verify, then delete local |
-| `prune-drive.sh` | daily | Permanently delete Drive archives ≥ 30 days after upload |
+| `backup.sh` | every 4 h (`00/4:00`) | Consistent archive → `backups/trapaholics-YYYY-MM-DD_HHMM.tar.zst` + `.sha256` |
+| `offload.sh` | hourly at `:30` | Upload archives older than 24 h to encrypted Drive, verify, then delete local |
+| `prune-drive.sh` | daily at `03:30` | Permanently delete Drive archives ≥ 30 days after upload |
+
+Enable the **timers** only (`systemctl enable --now …timer`); the `.service` units have no `[Install]` section.
 
 Local archives are **not** encrypted (`chmod 700` on `backups/`, `600` on files).
 Everything that leaves the server goes through the rclone **crypt** remote (B6).
@@ -144,8 +146,10 @@ chmod 755 /home/jt/mc/scripts/backup/*.sh
 - `config/`, `scripts/`, `docker-compose.yml`, `.env`, `frpc.toml`, `relay/` (if present)
 - MariaDB logical dump at `.backup-staging/luckperms.sql` (via
   `docker exec mariadb mariadb-dump --single-transaction`)
-- **Not** included: live `mariadb/` datadir, legacy `data/`, and optional excludes
-  from `backup.conf` (`libraries/`, `cache/`, `versions/`, old logs)
+- **Not** included: live `mariadb/` datadir and legacy top-level `data/` (not on
+  the include list). Optional excludes in `backup.conf` are **anchored** paths
+  such as `survival/libraries` (never bare `data`, which would strip world/plugin
+  data directories).
 
 While archiving, `backup.sh` runs `save-off` + `save-all flush` on running Paper
 containers (`survival`, `creative`) over `rcon-cli`, and always restores `save-on`
@@ -182,7 +186,8 @@ Repeated upload/verify failures trip a Discord alert after
 `--drive-use-trash=false`, then drops the log line. Safety net:
 
 ```bash
-rclone delete gdrive-crypt: --min-age 31d --drive-use-trash=false
+rclone delete gdrive-crypt: --min-age 31d --drive-use-trash=false \
+  --include 'trapaholics-*.tar.zst' --include 'trapaholics-*.tar.zst.sha256'
 ```
 
 ## Restore procedure
@@ -221,9 +226,15 @@ Practise this from a Drive copy before launch, and periodically after.
 6. **Start MariaDB only**, load the dump, then bring the rest up:
 
    ```bash
+   cd /home/jt/mc
+   set -a
+   # shellcheck disable=SC1091
+   source .env
+   set +a
    docker compose up -d mariadb
    # wait until healthy, then:
-   docker exec -i mariadb mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" < /home/jt/mc/.backup-staging/luckperms.sql
+   docker exec -e "MYSQL_PWD=${MARIADB_ROOT_PASSWORD}" -i mariadb \
+     mariadb -uroot < /home/jt/mc/.backup-staging/luckperms.sql
    docker compose up -d
    ```
 7. Confirm players can join; check LuckPerms groups; remove `.backup-staging/` when done.
@@ -238,9 +249,11 @@ From the worktree / repo:
 bash scripts/backup/test/run-tests.sh
 ```
 
-Uses temp dirs and stub `docker` / `rclone` / `df` / `flock`. Covers: normal
-backup + save-off/on, save-on on archive failure, low-space offload and abort,
-cryptcheck gate on delete, and 30-day prune selection.
+Uses temp dirs and stub `docker` / `rclone` / `df` (real `flock` from
+util-linux when available). Covers save-off/on, flush-failure trap via
+`backup.sh`, dump failure + alert, world/plugin `data/` retention, low-space
+abort + alert, cryptcheck gate, prune 29d23h/30d boundaries, malformed names,
+invalid `RCLONE_REMOTE`, same-minute rerun, and `.partial` skip.
 
 ### Manual checks on the server
 
