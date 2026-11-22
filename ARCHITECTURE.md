@@ -151,7 +151,10 @@ servers with `/server survival` / `/server creative` (or a lobby/compass item la
 | Geyser / Floodgate | 2.12.1 (beta) / 2.2.7 | ✅ |
 | **EssentialsX** | 2.22.0 stable = **up to 26.1.2 only** | ⚠️ 26.3 only in dev builds (2.22.1-dev) |
 | HuskClaims | 1.5.10 (up to 1.21.7) | ❌ |
-| VoxelSniper-Reimagined / FAVS / goBrush | versions unclear | ❓ test before committing |
+| **PlotSquared** | 7.6.1 (supports up to 26.2) | ❌ **open bug #4960**: chat output and titles break on 26.3; also #4959 (cushions not protected) |
+| **FastAsyncVoxelSniper** | 3.2.5 (lists 26.3; works with FAWE) | ✅ |
+| VoxelSniper-Reimagined | 8.14.0 (2024, not maintained) | ❌ |
+| CoreProtect | v24.1 public release = up to 26.2; v25 (26.3) on Patreon or built from source | ⚠️ build from GitHub source |
 | Arceon | 0.5.7 (paid) | ✅ claims 1.20–26.3 |
 
 ### Decision — Option A chosen
@@ -176,8 +179,10 @@ servers with `/server survival` / `/server creative` (or a lobby/compass item la
   older, so there's no reason to stay on it.
 - When EssentialsX 2.22.1 is released, swap the dev jars for the release. If the
   dev build ever breaks, fall back to Option C (custom plugin).
-- **PlotSquared** (needed for the creative plot world, §5.6) wasn't part of the
-  compatibility research. Confirm it has a 26.3 release before building.
+- **PlotSquared does not work on 26.3 yet** (issue #4960, open as of 2026-11-22).
+  This affects the creative plot world; see the creative decision in §7.
+  PlotSquared's code is GPL-3.0: the SpigotMC download is paid, but building it
+  from the GitHub source is free and allowed.
 - Pin exact versions (`VERSION`, Paper build, plugin jars) in compose/env — never
   use `latest` for game servers, to avoid surprise world upgrades.
 
@@ -212,11 +217,22 @@ servers with `/server survival` / `/server creative` (or a lobby/compass item la
 - The `SECRET_KEY` lives in `.env`, **not** in `docker-compose.yml`. The key now
   in `prepucio/docker-compose.yml` has been exposed in plain text, so generate a
   new agent secret in the playit dashboard and revoke the old one (§12).
-- **Real player IPs:** playit can send PROXY protocol to Velocity (playit's guide:
-  https://playit.gg/support/proxy-protocol-velocity/). Check whether the current
-  playit plan supports it. If it does, enable it on the tunnel **and** set
-  `haproxy-protocol = true` in Velocity. If not, leave both off, and every player
-  will appear to come from playit's address, so IP bans won't work.
+- **Real player IPs: use playit's PROXY protocol v2.**
+  - In the playit dashboard (https://playit.gg/account/tunnels/ → the tunnel →
+    **"Proxy Protocol"**), choose **Version 2**.
+  - In `velocity.toml`, set `[advanced] haproxy-protocol = true`.
+  - The playit agent must be **0.15.26 or newer**. Pin an image tag that meets this
+    (the old compose used `playit-agent:1.0`).
+  - playit's docs don't list this as a Premium feature, so it should work on the
+    free plan. Confirm the setting appears in the dashboard.
+  - Without it, every player shows up as `127.x.x.x`, so IP bans and alt detection
+    don't work.
+  - Once it's on, Velocity rejects any connection that doesn't come through playit,
+    including direct LAN joins.
+- playit free tier: shared routing (choosing a region is Premium), 4 ports. Using
+  your own domain is a Premium feature. Without Premium, an SRV record at your own
+  DNS pointing to the tunnel's hostname and port should still work, but this isn't
+  in playit's docs.
 - Velocity has no port published on the host, so the only way in is through the
   tunnel.
 
@@ -275,7 +291,8 @@ servers with `/server survival` / `/server creative` (or a lobby/compass item la
 | Plots | **PlotSquared** (26.3 support to confirm) | Plot world, plot claiming, keeps FAWE inside the player's own plot |
 | Multiple worlds | Multiverse-Core (or PlotSquared's own world handling) | Plot world + build world on one server |
 | Build-world protection | WorldGuard | Stops non-builders from changing the build world |
-| Terrain tools | **VoxelSniper** (if it supports 26.3) | Builder-only, build world only. Other tools may be added later |
+| Terrain tools | **FastAsyncVoxelSniper 3.2.5** | Maintained VoxelSniper fork that supports 26.3 and goes through FAWE. Builder-only, build world only. Other tools may be added later |
+| Block logging / rollback | **CoreProtect** (built from GitHub source for 26.3) | Undo griefing; the server is open to anyone. Also useful on survival |
 | Utilities | EssentialsX 2.22.1-dev | `/tp`, `/speed`, `/gamemode` |
 | Performance | spark | |
 
@@ -344,11 +361,17 @@ Three groups to start. More may be added later as more plugins are added.
 ## 7. Open Questions
 
 ### Still open
-1. **VoxelSniper on 26.3:** being checked. If no version works, the build world
-   starts with FAWE only, and other terrain tools are added later.
-2. **Phase 1 real IPs:** being checked: does playit's PROXY protocol work on the
-   current plan? (§5.2)
-3. **PlotSquared on 26.3:** being checked.
+1. **Creative plot world vs. PlotSquared's 26.3 bug (#4960).** Options:
+   - (a) Run the **creative server on Paper 26.2** with ViaVersion, so 26.3 players
+     can still join. Survival stays on 26.3. Upgrade creative to 26.3 once
+     PlotSquared is fixed (upgrading is safe; only downgrading isn't).
+   - (b) Keep creative on 26.3 and **launch the build world first**. Add the plot
+     world when PlotSquared ships a fix.
+   - (c) Write a custom plot plugin. This is not a small plugin: it needs a world
+     generator, protection and a FAWE hook.
+2. **Server blockers:** `/home` has only 553 MB free; 11 of 15 GB RAM is already in
+   use (a ~5.9 GB `java` process and a ~4.3 GB QEMU VM); user `jt` isn't in the
+   `docker` group.
 
 ### Decided (2026-11-22)
 | Topic | Decision |
@@ -364,7 +387,8 @@ Three groups to start. More may be added later as more plugins are added.
 | Access | **Open to anyone** (no whitelist) |
 | Plots | **64×64** blocks, **1 plot per player** (may change later) |
 | Build world | **Normal terrain** |
-| Terrain tools | **VoxelSniper** if it works on 26.3; others added later by the owner |
+| Terrain tools | **FastAsyncVoxelSniper** (works on 26.3); others added later by the owner |
+| Real IPs (Phase 1) | playit **PROXY protocol v2** + Velocity `haproxy-protocol = true` |
 | Admin alerts | **Discord webhook** to an admin-only log channel in the server's Discord |
 | Backups | Every 4 h; Drive after 24 h; **encrypted**; deleted from Drive **30 days** after upload; Drive has 5 TB, so storage isn't a concern |
 
