@@ -89,12 +89,15 @@ setup_fixture() {
 
   FIX="$(mktemp -d -t trapaholics-backup-test.XXXXXX)"
   mkdir -p \
-    "$FIX/repo/velocity" \
-    "$FIX/repo/survival/world/data" \
-    "$FIX/repo/survival/plugins/GriefPrevention/data" \
-    "$FIX/repo/creative/world" \
+    "$FIX/repo/minecraft/survival/data" \
+    "$FIX/repo/minecraft/creative" \
+    "$FIX/repo/minecraft/plugins/GriefPrevention/data" \
+    "$FIX/repo/minecraft/libraries" \
+    "$FIX/repo/geyser" \
     "$FIX/repo/config" \
     "$FIX/repo/scripts" \
+    "$FIX/repo/systemd" \
+    "$FIX/repo/docs" \
     "$FIX/repo/backups" \
     "$FIX/stubs" \
     "$FIX/state"
@@ -104,12 +107,12 @@ setup_fixture() {
 MARIADB_ROOT_PASSWORD=test-secret
 DISCORD_WEBHOOK_URL=https://discord.test/webhook/fake
 EOF
-  echo "world-marker" >"$FIX/repo/survival/world/data/KEEP_ME"
-  echo "plugin-marker" >"$FIX/repo/survival/plugins/GriefPrevention/data/KEEP_ME"
-  echo "creative data" >"$FIX/repo/creative/world/level.dat"
-  echo "proxy" >"$FIX/repo/velocity/velocity.toml"
-  mkdir -p "$FIX/repo/survival/libraries"
-  echo "lib" >"$FIX/repo/survival/libraries/skip.jar"
+  echo "world-marker" >"$FIX/repo/minecraft/survival/data/KEEP_ME"
+  echo "creative-marker" >"$FIX/repo/minecraft/creative/level.dat"
+  echo "plugin-marker" >"$FIX/repo/minecraft/plugins/GriefPrevention/data/KEEP_ME"
+  echo "floodgate-key" >"$FIX/repo/geyser/key.pem"
+  chmod 600 "$FIX/repo/geyser/key.pem"
+  echo "lib" >"$FIX/repo/minecraft/libraries/skip.jar"
   chmod 700 "$FIX/repo/backups"
 
   cat >"${FIX}/backup.conf" <<EOF
@@ -124,16 +127,16 @@ PRUNE_AGE_DAYS=30
 PRUNE_SAFETY_MIN_AGE_DAYS=31
 OFFLOAD_FAIL_ALERT_THRESHOLD=3
 OFFLOAD_LOCK_SKIP_ALERT_THRESHOLD=3
-PAPER_CONTAINERS="survival creative"
+PAPER_CONTAINERS="minecraft"
 MARIADB_CONTAINER="mariadb"
-MARIADB_DATABASE="luckperms"
+MARIADB_DATABASES="luckperms coreprotect"
 DOCKER_TIMEOUT_SEC=5
 SAVE_ALL_FLUSH_TIMEOUT_SEC=5
 MARIADB_DUMP_TIMEOUT_SEC=5
 OFFLOAD_LOCK_WAIT_SEC=2
 PRUNE_LOCK_WAIT_SEC=2
-BACKUP_EXCLUDES="survival/libraries survival/cache survival/versions"
-BACKUP_INCLUDE_PATHS="velocity survival creative config scripts docker-compose.yml .env"
+BACKUP_EXCLUDES="minecraft/libraries minecraft/cache minecraft/versions"
+BACKUP_INCLUDE_PATHS="minecraft geyser config scripts systemd docs docker-compose.yml .env"
 LOCK_NAME=".backup.lock"
 OFFLOAD_LOCK_NAME=".offload.lock"
 PRUNE_LOCK_NAME=".prune.lock"
@@ -161,11 +164,11 @@ EOF
   export DOCKER_TIMEOUT_SEC=5
   export SAVE_ALL_FLUSH_TIMEOUT_SEC=5
   export MARIADB_DUMP_TIMEOUT_SEC=5
-  export PAPER_CONTAINERS="survival creative"
+  export PAPER_CONTAINERS="minecraft"
   export MARIADB_CONTAINER="mariadb"
-  export MARIADB_DATABASE="luckperms"
-  export BACKUP_EXCLUDES="survival/libraries survival/cache survival/versions"
-  export BACKUP_INCLUDE_PATHS="velocity survival creative config scripts docker-compose.yml .env"
+  export MARIADB_DATABASES="luckperms coreprotect"
+  export BACKUP_EXCLUDES="minecraft/libraries minecraft/cache minecraft/versions"
+  export BACKUP_INCLUDE_PATHS="minecraft geyser config scripts systemd docs docker-compose.yml .env"
   unset BACKUP_ARCHIVE_STAMP
 
   export PATH="${FIX}/stubs:${PATH}"
@@ -238,8 +241,15 @@ case "\$1" in
       if [[ -f "\$STATE_DIR/dump.fail" ]]; then
         echo "mariadb-dump forced failure" >&2; exit 1
       fi
-      echo "-- fake dump of luckperms"
-      echo "CREATE DATABASE luckperms;"
+      # Echo whichever DB names follow --databases
+      echo "-- fake dump"
+      saw_db=0
+      for a in "\$@"; do
+        if [[ "\$saw_db" -eq 1 ]]; then
+          echo "CREATE DATABASE \$a;"
+        fi
+        [[ "\$a" == "--databases" ]] && saw_db=1
+      done
       exit 0
     fi
     exit 0
@@ -408,7 +418,7 @@ run_backup_sh() {
 # ---------------------------------------------------------------------------
 
 test_a_normal_backup_keeps_world_data() {
-  echo "TEST (a): normal backup + save-off/on; world/data retained"
+  echo "TEST (a): normal backup + save-off/on; minecraft worlds + geyser key retained"
   setup_fixture
   export BACKUP_ARCHIVE_STAMP="2026-01-15_1200"
   local archive
@@ -418,15 +428,23 @@ test_a_normal_backup_keeps_world_data() {
 
   assert_true "archive exists" test -f "$archive"
   assert_true "sha256 exists" test -f "${archive}.sha256"
+  # Prefer GNU stat -c; BSD uses -f. (On GNU, -f means --file-system, so order matters.)
+  arch_mode="$(stat -c '%a' "$archive" 2>/dev/null || stat -f '%Lp' "$archive")"
+  assert_true "archive mode 600" test "$arch_mode" = "600"
   assert_true "save-off logged" grep -q 'save-off' "${FIX}/state/rcon.log"
   assert_true "save-all flush logged" grep -q 'save-all flush' "${FIX}/state/rcon.log"
   assert_true "save-on logged" grep -q 'save-on' "${FIX}/state/rcon.log"
+  assert_true "rcon targeted minecraft" grep -q '^minecraft rcon' "${FIX}/state/rcon.log"
 
   local listing
   listing="$(zstd -dc "$archive" | tar -t)"
-  assert_true "world/data kept" grep -q 'survival/world/data/KEEP_ME' <<<"$listing"
-  assert_true "plugins data kept" grep -q 'survival/plugins/GriefPrevention/data/KEEP_ME' <<<"$listing"
-  assert_false "libraries excluded" grep -q 'survival/libraries/skip.jar' <<<"$listing"
+  assert_true "survival data kept" grep -q 'minecraft/survival/data/KEEP_ME' <<<"$listing"
+  assert_true "creative world kept" grep -q 'minecraft/creative/level.dat' <<<"$listing"
+  assert_true "plugins data kept" grep -q 'minecraft/plugins/GriefPrevention/data/KEEP_ME' <<<"$listing"
+  assert_true "geyser key.pem kept" grep -q 'geyser/key.pem' <<<"$listing"
+  assert_true "luckperms dump included" grep -q '.backup-staging/luckperms.sql' <<<"$listing"
+  assert_true "coreprotect dump included" grep -q '.backup-staging/coreprotect.sql' <<<"$listing"
+  assert_false "libraries excluded" grep -q 'minecraft/libraries/skip.jar' <<<"$listing"
   teardown_fixture
 }
 

@@ -29,7 +29,7 @@ _BACKUP_OVERRIDE_KEYS=(
   RCLONE_REMOTE RCLONE_BWLIMIT
   OFFLOAD_AGE_HOURS PRUNE_AGE_DAYS PRUNE_SAFETY_MIN_AGE_DAYS
   OFFLOAD_FAIL_ALERT_THRESHOLD OFFLOAD_LOCK_SKIP_ALERT_THRESHOLD
-  PAPER_CONTAINERS MARIADB_CONTAINER MARIADB_DATABASE
+  PAPER_CONTAINERS MARIADB_CONTAINER MARIADB_DATABASES
   BACKUP_EXCLUDES BACKUP_INCLUDE_PATHS
   DOCKER_TIMEOUT_SEC SAVE_ALL_FLUSH_TIMEOUT_SEC MARIADB_DUMP_TIMEOUT_SEC
   OFFLOAD_LOCK_WAIT_SEC PRUNE_LOCK_WAIT_SEC
@@ -95,11 +95,11 @@ backup_load_config() {
   PRUNE_SAFETY_MIN_AGE_DAYS=31
   OFFLOAD_FAIL_ALERT_THRESHOLD=3
   OFFLOAD_LOCK_SKIP_ALERT_THRESHOLD=3
-  PAPER_CONTAINERS="survival creative"
+  PAPER_CONTAINERS="minecraft"
   MARIADB_CONTAINER="mariadb"
-  MARIADB_DATABASE="luckperms"
-  BACKUP_EXCLUDES="survival/libraries survival/cache survival/versions creative/libraries creative/cache creative/versions velocity/libraries survival/logs/*.log.gz creative/logs/*.log.gz"
-  BACKUP_INCLUDE_PATHS="velocity survival creative config scripts docker-compose.yml .env frpc.toml relay"
+  MARIADB_DATABASES="luckperms coreprotect"
+  BACKUP_EXCLUDES="minecraft/libraries minecraft/cache minecraft/versions minecraft/logs/*.log.gz"
+  BACKUP_INCLUDE_PATHS="minecraft geyser config scripts systemd docs docker-compose.yml .env frpc.toml relay"
   DOCKER_TIMEOUT_SEC=60
   SAVE_ALL_FLUSH_TIMEOUT_SEC=300
   MARIADB_DUMP_TIMEOUT_SEC=900
@@ -463,34 +463,59 @@ paper_save_on() {
 # MariaDB dump
 # ---------------------------------------------------------------------------
 
-mariadb_dump_to() {
-  local outfile="$1"
-  local password=""
+# Dump one database to outfile. Returns 1 on failure.
+mariadb_dump_one() {
+  local db="$1"
+  local outfile="$2"
+  local password="$3"
+  log_info "Dumping ${db} from ${MARIADB_CONTAINER}"
+  # Inherit MYSQL_PWD from this process env into the container (-e MYSQL_PWD with
+  # no =value). Keeps the password off docker's argv.
+  if ! MYSQL_PWD="$password" with_timeout "$MARIADB_DUMP_TIMEOUT_SEC" \
+      "$DOCKER_BIN" exec -e MYSQL_PWD "$MARIADB_CONTAINER" \
+      mariadb-dump -uroot --single-transaction --databases "$db" \
+      >"$outfile"; then
+    log_error "mariadb-dump failed for ${db}"
+    rm -f "$outfile"
+    return 1
+  fi
+  if [[ ! -s "$outfile" ]]; then
+    log_error "mariadb-dump produced empty output for ${db}"
+    rm -f "$outfile"
+    return 1
+  fi
+  chmod 600 "$outfile" || return 1
+}
+
+# Dump every database in MARIADB_DATABASES into STAGING_DIR/<db>.sql.
+# Returns 1 if any dump fails. Skips (warns) if the container is not running.
+mariadb_dump_all() {
+  local password="" db outfile any=0
   if ! container_running "$MARIADB_CONTAINER"; then
     log_warn "container ${MARIADB_CONTAINER} not running; skipping DB dump"
     return 0
   fi
   if ! backup_get_env MARIADB_ROOT_PASSWORD password || [[ -z "$password" ]]; then
-    log_error "MARIADB_ROOT_PASSWORD missing from .env; cannot dump database"
+    log_error "MARIADB_ROOT_PASSWORD missing from .env; cannot dump databases"
     return 1
   fi
-  log_info "Dumping ${MARIADB_DATABASE} from ${MARIADB_CONTAINER}"
-  # Inherit MYSQL_PWD from this process env into the container (-e MYSQL_PWD with
-  # no =value). Keeps the password off docker's argv.
-  if ! MYSQL_PWD="$password" with_timeout "$MARIADB_DUMP_TIMEOUT_SEC" \
-      "$DOCKER_BIN" exec -e MYSQL_PWD "$MARIADB_CONTAINER" \
-      mariadb-dump -uroot --single-transaction --databases "$MARIADB_DATABASE" \
-      >"$outfile"; then
-    log_error "mariadb-dump failed"
-    rm -f "$outfile"
+  if [[ -z "${MARIADB_DATABASES// }" ]]; then
+    log_error "MARIADB_DATABASES is empty; nothing to dump"
     return 1
   fi
-  if [[ ! -s "$outfile" ]]; then
-    log_error "mariadb-dump produced empty output"
-    rm -f "$outfile"
+  # shellcheck disable=SC2086
+  for db in $MARIADB_DATABASES; do
+    any=1
+    outfile="${STAGING_DIR}/${db}.sql"
+    if ! mariadb_dump_one "$db" "$outfile" "$password"; then
+      return 1
+    fi
+  done
+  if [[ "$any" -eq 0 ]]; then
+    log_error "MARIADB_DATABASES produced no dump targets"
     return 1
   fi
-  chmod 600 "$outfile" || return 1
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -513,7 +538,8 @@ backup_build_tar_args() {
 # Create trapaholics-YYYY-MM-DD_HHMM.tar.zst + .sha256 in BACKUP_DIR.
 # Writes via .partial; writes .sha256 to the final path BEFORE moving the archive.
 backup_create_archive() {
-  local stamp name archive partial dump_abs stage_link
+  local stamp name archive partial stage_link
+  local dump_count=0 db
   if [[ -n "${BACKUP_ARCHIVE_STAMP:-}" ]]; then
     if [[ ! "$BACKUP_ARCHIVE_STAMP" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{4}$ ]]; then
       log_error "BACKUP_ARCHIVE_STAMP must match YYYY-MM-DD_HHMM (got '${BACKUP_ARCHIVE_STAMP}')"
@@ -526,7 +552,6 @@ backup_create_archive() {
   name="trapaholics-${stamp}.tar.zst"
   archive="${BACKUP_DIR}/${name}"
   partial="${archive}.partial"
-  dump_abs="${STAGING_DIR}/${MARIADB_DATABASE}.sql"
   stage_link="${REPO_ROOT}/.backup-staging"
 
   if [[ -e "$archive" ]]; then
@@ -538,7 +563,7 @@ backup_create_archive() {
   mkdir -p "$STAGING_DIR" || return 1
   chmod 700 "$STAGING_DIR" || return 1
 
-  if ! mariadb_dump_to "$dump_abs"; then
+  if ! mariadb_dump_all; then
     return 1
   fi
 
@@ -557,12 +582,18 @@ backup_create_archive() {
   done
 
   rm -rf "$stage_link" || return 1
-  if [[ -f "$dump_abs" ]]; then
-    mkdir -p "$stage_link" || return 1
-    cp -a "$dump_abs" "${stage_link}/${MARIADB_DATABASE}.sql" || return 1
+  # shellcheck disable=SC2086
+  for db in $MARIADB_DATABASES; do
+    if [[ -f "${STAGING_DIR}/${db}.sql" ]]; then
+      mkdir -p "$stage_link" || return 1
+      cp -a "${STAGING_DIR}/${db}.sql" "${stage_link}/${db}.sql" || return 1
+      dump_count=$((dump_count + 1))
+    fi
+  done
+  if [[ "$dump_count" -gt 0 ]]; then
     include_args+=(".backup-staging")
   else
-    log_warn "No DB dump file; archive will not include MariaDB dump"
+    log_warn "No DB dump files; archive will not include MariaDB dumps"
   fi
 
   if [[ ${#include_args[@]} -eq 0 ]]; then

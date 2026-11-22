@@ -21,7 +21,7 @@ Do **not** commit these. Put them in the repo-root `.env` (mode 600):
 | Variable | Used by | Purpose |
 |---|---|---|
 | `DISCORD_WEBHOOK_URL` | all three scripts | Admin-only Discord channel for failure / low-space / prune alerts. If unset, scripts log a warning and continue. |
-| `MARIADB_ROOT_PASSWORD` | `backup.sh` | Password for `mariadb-dump` of the `luckperms` database. |
+| `MARIADB_ROOT_PASSWORD` | `backup.sh` | Password for `mariadb-dump` of each database in `MARIADB_DATABASES` (default: `luckperms` and `coreprotect`). |
 
 Tunables (non-secret) live in `scripts/backup/backup.conf`.
 
@@ -142,18 +142,25 @@ chmod 755 /home/jt/mc/scripts/backup/*.sh
 
 ## What each backup contains
 
-- `velocity/`, `survival/`, `creative/` (worlds, plugins, configs)
-- `config/`, `scripts/`, `docker-compose.yml`, `.env`, `frpc.toml`, `relay/` (if present)
-- MariaDB logical dump at `.backup-staging/luckperms.sql` (via
-  `docker exec mariadb mariadb-dump --single-transaction`)
+Single Paper server layout (containers: `minecraft`, `geyser`, `mariadb`, `playit`):
+
+- `minecraft/` — all worlds (`survival`, `survival_nether`, `survival_the_end`,
+  `creative`, …) plus plugins and plugin data
+- `geyser/` — Geyser Standalone data, including Floodgate `key.pem` (archives are
+  mode `600`)
+- `config/`, `scripts/`, `systemd/`, `docs/`, `docker-compose.yml`, `.env`, and
+  `frpc.toml` / `relay/` if present
+- MariaDB logical dumps at `.backup-staging/<db>.sql` for each name in
+  `MARIADB_DATABASES` (default `luckperms` and `coreprotect`), via
+  `docker exec mariadb mariadb-dump --single-transaction --databases <db>`
 - **Not** included: live `mariadb/` datadir and legacy top-level `data/` (not on
   the include list). Optional excludes in `backup.conf` are **anchored** paths
-  such as `survival/libraries` (never bare `data`, which would strip world/plugin
+  such as `minecraft/libraries` (never bare `data`, which would strip world/plugin
   data directories).
 
-While archiving, `backup.sh` runs `save-off` + `save-all flush` on running Paper
-containers (`survival`, `creative`) over `rcon-cli`, and always restores `save-on`
-via an EXIT trap.
+While archiving, `backup.sh` runs `save-off` + `save-all flush` on the running
+Paper container (`minecraft`) over `rcon-cli`, and always restores `save-on` via
+an EXIT trap. `geyser` has no RCON and is not paused.
 
 ## Low-disk behaviour (B4 / B5)
 
@@ -232,12 +239,15 @@ Practise this from a Drive copy before launch, and periodically after.
    source .env
    set +a
    docker compose up -d mariadb
-   # wait until healthy, then:
-   MYSQL_PWD="$MARIADB_ROOT_PASSWORD" docker exec -e MYSQL_PWD -i mariadb \
-     mariadb -uroot < /home/jt/mc/.backup-staging/luckperms.sql
+   # wait until healthy, then load every dump (LuckPerms, CoreProtect, …):
+   for f in /home/jt/mc/.backup-staging/*.sql; do
+     MYSQL_PWD="$MARIADB_ROOT_PASSWORD" docker exec -e MYSQL_PWD -i mariadb \
+       mariadb -uroot < "$f"
+   done
    docker compose up -d
    ```
-7. Confirm players can join; check LuckPerms groups; remove `.backup-staging/` when done.
+7. Confirm players can join (Java + Bedrock via Geyser); check LuckPerms groups;
+   remove `.backup-staging/` when done.
 
 ## Testing without production
 
