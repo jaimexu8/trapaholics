@@ -1,0 +1,11 @@
+# Seed for PlotSquared's worlds.yml (tracked template). It is copied in before the
+# first start so the `plots` world is generated with these values; PlotSquared
+# fills in every other key with its defaults. Changing plot/road sizes after the
+# world exists breaks existing plots — don't.
+worlds:
+  plots:
+    plot:
+      size: 64
+    road:
+      width: 7
+configuration_version: post_flattening
