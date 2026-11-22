@@ -1,0 +1,13 @@
+# Secrets
+.env
+*.env
+!.env.example
+rclone.conf
+
+# Server data (worlds, plugin data, logs, jars) — backed up by the backup system, not git
+data/
+velocity/*
+survival/*
+creative/*
+backups/
+mariadb/
