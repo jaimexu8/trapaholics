@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily trapaholics Drive backup prune (30-day retention)
+Documentation=file:///home/jt/mc/docs/BACKUPS.md
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+Unit=trapaholics-prune-drive.service
+
+[Install]
+WantedBy=timers.target

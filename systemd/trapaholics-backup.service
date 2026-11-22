@@ -1,0 +1,25 @@
+[Unit]
+Description=trapaholics Minecraft full-network backup
+Documentation=file:///home/jt/mc/docs/BACKUPS.md
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+User=jt
+Group=jt
+WorkingDirectory=/home/jt/mc
+Environment=HOME=/home/jt
+# docker group membership lets jt talk to the daemon without root.
+ExecStart=/home/jt/mc/scripts/backup/backup.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+
+# Capture script logs in the journal.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trapaholics-backup
+
+[Install]
+WantedBy=multi-user.target

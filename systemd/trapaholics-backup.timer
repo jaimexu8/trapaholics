@@ -1,0 +1,11 @@
+[Unit]
+Description=Run trapaholics backup every 4 hours (00/04/08/12/16/20)
+Documentation=file:///home/jt/mc/docs/BACKUPS.md
+
+[Timer]
+OnCalendar=*-*-* 00,04,08,12,16,20:00:00
+Persistent=true
+Unit=trapaholics-backup.service
+
+[Install]
+WantedBy=timers.target
