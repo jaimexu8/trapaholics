@@ -1,10 +1,11 @@
 [Unit]
-Description=Hourly trapaholics backup offload to Google Drive
+Description=Hourly trapaholics backup offload to Google Drive (UTC :30)
 Documentation=file:///home/jt/mc/docs/BACKUPS.md
 
 [Timer]
-OnCalendar=hourly
+OnCalendar=*-*-* *:30:00 UTC
 Persistent=true
+RandomizedDelaySec=60
 Unit=trapaholics-offload.service
 
 [Install]

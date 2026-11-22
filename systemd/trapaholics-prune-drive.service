@@ -10,11 +10,10 @@ User=jt
 Group=jt
 WorkingDirectory=/home/jt/mc
 Environment=HOME=/home/jt
+UMask=0077
 ExecStart=/home/jt/mc/scripts/backup/prune-drive.sh
 Nice=10
+TimeoutStartSec=1h
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=trapaholics-prune-drive
-
-[Install]
-WantedBy=multi-user.target

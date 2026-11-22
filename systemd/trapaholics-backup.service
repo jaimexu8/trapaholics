@@ -10,16 +10,12 @@ User=jt
 Group=jt
 WorkingDirectory=/home/jt/mc
 Environment=HOME=/home/jt
-# docker group membership lets jt talk to the daemon without root.
+UMask=0077
 ExecStart=/home/jt/mc/scripts/backup/backup.sh
 Nice=10
 IOSchedulingClass=best-effort
 IOSchedulingPriority=7
-
-# Capture script logs in the journal.
+TimeoutStartSec=2h
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=trapaholics-backup
-
-[Install]
-WantedBy=multi-user.target
