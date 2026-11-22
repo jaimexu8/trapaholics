@@ -140,6 +140,25 @@ chmod 644 /home/jt/mc/scripts/backup/backup.conf /home/jt/mc/scripts/backup/lib.
 chmod 755 /home/jt/mc/scripts/backup/*.sh
 ```
 
+### 5. Pre-deploy readability check
+
+Backups run as user `jt`. Root-owned unreadable files under `minecraft/` or
+`geyser/` (for example a Floodgate `key.pem` created as root) make every backup
+fail. Before enabling timers:
+
+```bash
+sudo -u jt tar -cf /dev/null -C /home/jt/mc minecraft geyser
+```
+
+That must succeed. Fix ownership (`chown -R jt:jt …`) if it does not.
+
+MariaDB notes:
+
+- CoreProtect (and LuckPerms) tables should use **InnoDB** so
+  `mariadb-dump --single-transaction` is a consistent snapshot.
+- `MARIADB_DUMP_TIMEOUT_SEC` defaults to **900**. Raise it in `backup.conf` as
+  the CoreProtect database grows.
+
 ## What each backup contains
 
 Single Paper server layout (containers: `minecraft`, `geyser`, `mariadb`, `playit`):
@@ -158,9 +177,10 @@ Single Paper server layout (containers: `minecraft`, `geyser`, `mariadb`, `playi
   such as `minecraft/libraries` (never bare `data`, which would strip world/plugin
   data directories).
 
-While archiving, `backup.sh` runs `save-off` + `save-all flush` on the running
-Paper container (`minecraft`) over `rcon-cli`, and always restores `save-on` via
-an EXIT trap. `geyser` has no RCON and is not paused.
+`backup.sh` dumps MariaDB **before** pausing autosave, then runs `save-off` +
+`save-all flush` on the running Paper container (`minecraft`) over `rcon-cli`,
+archives, and always restores `save-on` via an EXIT trap. `geyser` has no RCON
+and is not paused.
 
 ## Low-disk behaviour (B4 / B5)
 
@@ -242,7 +262,7 @@ Practise this from a Drive copy before launch, and periodically after.
    # wait until healthy, then load every dump (LuckPerms, CoreProtect, …):
    for f in /home/jt/mc/.backup-staging/*.sql; do
      MYSQL_PWD="$MARIADB_ROOT_PASSWORD" docker exec -e MYSQL_PWD -i mariadb \
-       mariadb -uroot < "$f"
+       mariadb -uroot < "$f" || { echo "load failed: $f"; break; }
    done
    docker compose up -d
    ```

@@ -241,11 +241,15 @@ case "\$1" in
       if [[ -f "\$STATE_DIR/dump.fail" ]]; then
         echo "mariadb-dump forced failure" >&2; exit 1
       fi
-      # Echo whichever DB names follow --databases
+      # Echo whichever DB names follow --databases; honor dump.fail.<dbname>
       echo "-- fake dump"
       saw_db=0
       for a in "\$@"; do
         if [[ "\$saw_db" -eq 1 ]]; then
+          if [[ -f "\$STATE_DIR/dump.fail.\$a" ]]; then
+            echo "mariadb-dump forced failure for \$a" >&2
+            exit 1
+          fi
           echo "CREATE DATABASE \$a;"
         fi
         [[ "\$a" == "--databases" ]] && saw_db=1
@@ -472,8 +476,32 @@ test_c_dump_failure_fails_and_alerts() {
   local rc=$?
   set -e
   assert_true "backup failed" test "$rc" -ne 0
-  assert_true "save-on ran" grep -q 'save-on' "${FIX}/state/rcon.log"
+  # Dumps run before save-off, so save-off may never have been issued.
   assert_alert_title "dump failure alert" "backup failure"
+  assert_false "no final archive" bash -c "ls '${BACKUP_DIR}'/trapaholics-*.tar.zst >/dev/null 2>&1"
+  assert_false "no partial left" bash -c "ls '${BACKUP_DIR}'/*.partial >/dev/null 2>&1"
+  teardown_fixture
+}
+
+test_c2_coreprotect_only_dump_fails() {
+  echo "TEST (c2): only coreprotect dump fails — backup aborts, alert, no archive"
+  setup_fixture
+  touch "${FIX}/state/dump.fail.coreprotect"
+  rm -f "${FIX}/state/curl.log" "${FIX}/state/curl.payload" "${FIX}/state/rcon.log"
+  set +e
+  run_backup_sh >/dev/null 2>"${FIX}/state/backup.err"
+  local rc=$?
+  set -e
+  assert_true "backup failed on coreprotect dump" test "$rc" -ne 0
+  assert_file_contains "error mentions coreprotect" "${FIX}/state/backup.err" 'coreprotect'
+  assert_alert_title "specific dump alert" "backup failure"
+  assert_file_contains "alert mentions dump" "${FIX}/state/curl.payload" 'mariadb-dump'
+  assert_false "no final archive" bash -c "ls '${BACKUP_DIR}'/trapaholics-*.tar.zst >/dev/null 2>&1"
+  assert_false "no partial left" bash -c "ls '${BACKUP_DIR}'/*.partial >/dev/null 2>&1"
+  # luckperms may have been written then cleaned by EXIT trap; ensure save-off never ran
+  # (dump fails before paper_save_off)
+  assert_false "save-off not issued before dump failure" \
+    bash -c "[[ -f '${FIX}/state/rcon.log' ]] && grep -q save-off '${FIX}/state/rcon.log'"
   teardown_fixture
 }
 
@@ -821,22 +849,45 @@ test_r_orphan_sha256_and_stamp_validation() {
 }
 
 test_s_touch_failures_alert() {
-  echo "TEST (s): repeated rclone touch failures alert (own counter, not reset by success)"
+  echo "TEST (s): consecutive rclone touch failures alert; success resets counter"
   setup_fixture
   export OFFLOAD_FAIL_ALERT_THRESHOLD=3
+  OFFLOAD_FAIL_ALERT_THRESHOLD=3
+  rm -f "${FIX}/state/curl.log" "${FIX}/state/curl.payload" \
+    "${BACKUP_DIR}/.offload-touch-fail-count"
+
+  # One failing offload = 2 touch bumps (archive + sha256); no alert yet.
   echo "fail" >"${FIX}/state/rclone_touch"
+  offload_archive "$(make_fake_archive 'trapaholics-2026-04-01_1200.tar.zst')" || true
+  assert_false "no alert after 2 touch fails" \
+    bash -c "[[ -f '${FIX}/state/curl.payload' ]] && grep -q 'upload/verify failure' '${FIX}/state/curl.payload'"
+
+  # Successful touch resets the consecutive counter.
+  echo "ok" >"${FIX}/state/rclone_touch"
+  offload_archive "$(make_fake_archive 'trapaholics-2026-04-02_1200.tar.zst')" || true
+  assert_false "touch counter file cleared on success" \
+    test -f "${BACKUP_DIR}/.offload-touch-fail-count"
+
+  # Three consecutive failing offloads (6 bumps) → alert at threshold 3.
   rm -f "${FIX}/state/curl.log" "${FIX}/state/curl.payload"
-
-  local i arch
-  for i in 1 2 3; do
-    arch="$(make_fake_archive "trapaholics-2026-04-0${i}_1200.tar.zst")"
-    # copy+cryptcheck succeed; touch fails — upload still completes
-    offload_archive "$arch" || true
+  echo "fail" >"${FIX}/state/rclone_touch"
+  local i
+  for i in 3 4 5; do
+    offload_archive "$(make_fake_archive "trapaholics-2026-04-0${i}_1200.tar.zst")" || true
   done
-
-  # 3 archives × 2 touches (archive + sha256) = 6 bumps; alert fires at threshold 3
-  assert_alert_title "touch failure alert" "upload/verify failure"
+  assert_alert_title "touch failure alert after consecutive fails" "upload/verify failure"
   assert_file_contains "touch failure message" "${FIX}/state/curl.payload" 'touch'
+  teardown_fixture
+}
+
+test_t_mariadb_database_name_validation() {
+  echo "TEST (t): invalid MARIADB_DATABASES entry refused at config load"
+  setup_fixture
+  export MARIADB_DATABASES='luckperms bad;name'
+  unset TRAPAHOLICS_BACKUP_LIB_LOADED
+  # shellcheck source=../lib.sh disable=SC1091
+  source "${SCRIPTS}/lib.sh"
+  assert_false "bad DB name rejected" backup_load_config
   teardown_fixture
 }
 
@@ -851,6 +902,7 @@ echo "REAL_FLOCK=${REAL_FLOCK:-none}"
 test_a_normal_backup_keeps_world_data
 test_b_flush_fail_still_save_on_via_backup_sh
 test_c_dump_failure_fails_and_alerts
+test_c2_coreprotect_only_dump_fails
 test_d_low_space_abort_keeps_newer_and_alerts
 test_e_offload_cryptcheck_and_partial_skip
 test_f_prune_boundaries_and_malformed
@@ -867,6 +919,7 @@ test_p_missing_sha256_skips_in_oldest_one
 test_q_release_lock_preserves_stderr
 test_r_orphan_sha256_and_stamp_validation
 test_s_touch_failures_alert
+test_t_mariadb_database_name_validation
 
 echo ""
 echo "Results: ${PASS} passed, ${FAIL} failed, ${SKIP} skipped"

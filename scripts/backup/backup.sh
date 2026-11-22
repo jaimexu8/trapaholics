@@ -39,7 +39,22 @@ main() {
     log_error "Aborting backup: insufficient space after offload attempts"
     exit 1
   fi
-  # backup_ensure_space releases the offload lock itself; belt-and-suspenders:
+  release_offload_lock || true
+
+  # Dump MariaDB before save-off so a long CoreProtect dump does not pause autosave.
+  backup_prepare_staging || exit 1
+  if ! mariadb_dump_all; then
+    log_error "MariaDB dump failed"
+    discord_alert "backup failure" \
+      "mariadb-dump failed on $(hostname -s 2>/dev/null || hostname) (check MARIADB_DATABASES / journal)."
+    exit 1
+  fi
+
+  # Dumps now occupy disk under STAGING_DIR; re-check space with dump size in the estimate.
+  if ! backup_ensure_space; then
+    log_error "Aborting backup: insufficient space after DB dumps"
+    exit 1
+  fi
   release_offload_lock || true
 
   paper_save_off

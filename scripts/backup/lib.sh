@@ -179,6 +179,26 @@ backup_load_config() {
   if ! backup_validate_rclone_remote; then
     return 1
   fi
+  if ! backup_validate_mariadb_databases; then
+    return 1
+  fi
+}
+
+# Every MARIADB_DATABASES entry must be a plain identifier (no injection / path tricks).
+backup_validate_mariadb_databases() {
+  local db
+  if [[ -z "${MARIADB_DATABASES// }" ]]; then
+    log_error "MARIADB_DATABASES is empty"
+    return 1
+  fi
+  # shellcheck disable=SC2086
+  for db in $MARIADB_DATABASES; do
+    if [[ ! "$db" =~ ^[A-Za-z0-9_]+$ ]]; then
+      log_error "Invalid MARIADB_DATABASES entry '${db}' (must match ^[A-Za-z0-9_]+\$)"
+      return 1
+    fi
+  done
+  return 0
 }
 
 backup_warn_missing_webhook() {
@@ -313,14 +333,28 @@ backup_newest_archive_bytes() {
   wc -c <"$newest" | tr -d ' '
 }
 
+# Bytes of SQL dumps already sitting in STAGING_DIR (0 if none).
+backup_dump_bytes() {
+  local total=0 f
+  shopt -s nullglob
+  for f in "$STAGING_DIR"/*.sql; do
+    total=$((total + $(wc -c <"$f" | tr -d ' ')))
+  done
+  shopt -u nullglob
+  printf '%s' "$total"
+}
+
 backup_estimate_bytes() {
-  local newest
+  local newest base dump_bytes
   newest="$(backup_newest_archive_bytes)"
   if [[ "$newest" -gt 0 ]]; then
-    awk -v n="$newest" -v m="$BACKUP_SIZE_MULTIPLIER" 'BEGIN { printf "%d", n * m }'
+    base="$(awk -v n="$newest" -v m="$BACKUP_SIZE_MULTIPLIER" 'BEGIN { printf "%d", n * m }')"
   else
-    backup_live_data_bytes
+    base="$(backup_live_data_bytes)"
   fi
+  # When dumps are already staged, include them so space checks cover the archive payload.
+  dump_bytes="$(backup_dump_bytes)"
+  printf '%s' "$((base + dump_bytes))"
 }
 
 # List local complete archives oldest-first by name. Skips *.partial.
@@ -535,8 +569,16 @@ backup_build_tar_args() {
   done
 }
 
+# Ensure STAGING_DIR exists (dumps land here before save-off).
+backup_prepare_staging() {
+  mkdir -p "$STAGING_DIR" || return 1
+  chmod 700 "$STAGING_DIR" || return 1
+}
+
 # Create trapaholics-YYYY-MM-DD_HHMM.tar.zst + .sha256 in BACKUP_DIR.
-# Writes via .partial; writes .sha256 to the final path BEFORE moving the archive.
+# Expects DB dumps already in STAGING_DIR (backup.sh dumps before save-off).
+# If staging has no dumps (direct test calls), dumps now. Uses mv (not cp) into
+# .backup-staging so each dump is not kept twice on disk.
 backup_create_archive() {
   local stamp name archive partial stage_link
   local dump_count=0 db
@@ -559,12 +601,13 @@ backup_create_archive() {
     return 1
   fi
 
-  rm -rf "$STAGING_DIR" || return 1
-  mkdir -p "$STAGING_DIR" || return 1
-  chmod 700 "$STAGING_DIR" || return 1
+  backup_prepare_staging || return 1
 
-  if ! mariadb_dump_all; then
-    return 1
+  # Dump only if backup.sh has not already populated staging (direct harness calls).
+  if ! compgen -G "${STAGING_DIR}/*.sql" >/dev/null; then
+    if ! mariadb_dump_all; then
+      return 1
+    fi
   fi
 
   local tar_excludes=()
@@ -586,7 +629,8 @@ backup_create_archive() {
   for db in $MARIADB_DATABASES; do
     if [[ -f "${STAGING_DIR}/${db}.sql" ]]; then
       mkdir -p "$stage_link" || return 1
-      cp -a "${STAGING_DIR}/${db}.sql" "${stage_link}/${db}.sql" || return 1
+      # Same filesystem under REPO_ROOT: mv avoids a second full copy.
+      mv "${STAGING_DIR}/${db}.sql" "${stage_link}/${db}.sql" || return 1
       dump_count=$((dump_count + 1))
     fi
   done
@@ -787,15 +831,20 @@ offload_archive() {
 
   # Safety-net age tracks upload time: touch REMOTE objects after verify.
   # --no-create (-C): never invent a missing remote file.
-  # Touch failures use a separate counter so a later _offload_fail_reset
-  # (successful upload path) cannot wipe them.
+  # Touch failures use a separate counter; reset only after a fully successful touch.
+  local touch_ok=1
   if ! "$RCLONE_BIN" touch --no-create "$(rclone_remote_path "$base")"; then
     log_warn "rclone touch failed for ${base} (safety-net age may be off)"
     _offload_touch_fail_bump "rclone touch failed for ${base}"
+    touch_ok=0
   fi
   if ! "$RCLONE_BIN" touch --no-create "$(rclone_remote_path "${base}.sha256")"; then
     log_warn "rclone touch failed for ${base}.sha256 (safety-net age may be off)"
     _offload_touch_fail_bump "rclone touch failed for ${base}.sha256"
+    touch_ok=0
+  fi
+  if [[ "$touch_ok" -eq 1 ]]; then
+    _offload_touch_fail_reset
   fi
 
   local uploaded_at
