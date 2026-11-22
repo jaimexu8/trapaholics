@@ -2,7 +2,8 @@
 
 Step-by-step go-live on the Debian host (`ssh moth`, user `jt`, repo at
 `/home/jt/mc`). Design background: [ARCHITECTURE.md](ARCHITECTURE.md). Backups
-are set up separately (see the backup docs once they land).
+are a separate system (PR #1): scripts in `scripts/backup/`, systemd units in
+`systemd/`, full guide in [docs/BACKUPS.md](docs/BACKUPS.md). Step 11 below sets them up.
 
 What runs (all from `docker-compose.yml`, every version pinned):
 
@@ -172,8 +173,8 @@ grep -A3 '^  builder:' creative/plugins/FastAsyncWorldEdit/config.yml
 
 | Group | Survival | Creative | Network |
 |---|---|---|---|
-| `default` | `/tpa` `/tpahere` `/tpaccept` `/tpdeny`, `/home` `/sethome` (3 homes: Essentials `sethome-multiple.default`), `/spawn`, GriefPrevention claims | `plots.permpack.basic` + `plots.plot.1` (one plot via `/plot auto`), build in own plot; in world `plots`: `fawe.plotsquared` + basic WorldEdit (`//set`, `//replace`, selections, copy/paste, undo…), masked to own plots by FAWE region restrictions; FAWE `limits.default` | `/server`, `/msg` `/r` `/list` |
-| `builder` (inherits default) | same as default | `fawe.limit.builder` (higher limits); in world `build`: WorldGuard region member + `worldguard.region.bypass.build`, `worldedit.*`, `fawe.bypass.regions` (FAWE anywhere), FastAsyncVoxelSniper (`voxelsniper.sniper`, `voxelsniper.brush.*`); `/speed`, `/tp` | |
+| `default` | `/tpa` `/tpahere` `/tpaccept` `/tpdeny`, `/home` `/sethome` (3 homes: Essentials `sethome-multiple.default`), `/spawn`, GriefPrevention claims | PlotSquared basics (the `plots.permpack.basic` nodes except download/save/buy/merge, listed one by one) + `plots.plot.1` (one plot via `/plot auto`), build in own plot; in world `plots`: `fawe.plotsquared` + basic WorldEdit (`//set`, `//replace`, selections, copy/paste, undo…), masked to own plots by FAWE region restrictions; FAWE `limits.default` | `/server`, `/msg` `/r` `/list` |
+| `builder` (inherits default) | same as default | `fawe.limit.builder` (higher limits); in world `build`: WorldGuard region member + `worldguard.region.bypass.build`, `fawe.permpack.basic` (FAWE's full builder command set, without admin nodes like `worldedit.reload`), `fawe.bypass.regions` (FAWE anywhere), FastAsyncVoxelSniper (`voxelsniper.sniper`, `voxelsniper.brush.*`); `/speed`, `/tp` | |
 | `admin` | `*` | `*` | `*` (also on Velocity) |
 
 FAWE limits (tune in `config/patches/creative/fawe-limits.json`, then restart creative):
@@ -198,6 +199,14 @@ docker exec survival rcon-cli "lp user <name> parent add builder"   # promote a 
 ```
 
 Avoid OPs. Keep `ops.json` for the owner only, as a break-glass fallback.
+
+> ⚠️ **Don't give one user both `admin` and `builder`**, and never add explicit
+> `false` nodes to `default` or `builder`. In LuckPerms an exact `false` node
+> beats admin's `*` wildcard, so the negation would take that permission away
+> from the admin too. Every player keeps `default` as a parent, so this applies to
+> `default` as well. `groups.lp` currently contains **no** `false` nodes: it simply
+> leaves out what a group shouldn't have. To make a builder an admin, swap the groups:
+> `lp user <name> parent remove builder` then `lp user <name> parent add admin`.
 
 ## 8. Enable PROXY protocol in playit, then start the tunnel
 
@@ -244,9 +253,38 @@ on shutdown and resumes with `chunky continue`.
 ## 10. After go-live
 
 - The old **`data/`** dir (the 26.2 world from `prepucio/`) is no longer used by
-  anything. Once the new network is live and backed up, archive it if you want
+  anything. Once the new network is live and backed up (step 11), archive it if you want
   (e.g. to Drive), then delete it: `rm -rf ~/mc/data`. That frees about 280 MB.
-- Set up backups (separate task/docs).
+
+## 11. Backups
+
+The backup system comes from PR #1: `scripts/backup/` (`backup.sh`, `offload.sh`,
+`prune-drive.sh`, `backup.conf`), `systemd/` (three `.service` + `.timer` pairs)
+and **[docs/BACKUPS.md](docs/BACKUPS.md)**, the authoritative guide. In short:
+
+1. Install the tools: `sudo apt-get install -y rclone zstd curl`.
+2. Create the rclone remotes `gdrive` (Google OAuth, headless) and `gdrive-crypt`
+   (crypt over `gdrive:mc-backups`), as in docs/BACKUPS.md §2. Store the crypt
+   password and salt in your password manager, because without them the Drive
+   backups can't be restored. Then `chmod 600 ~/.config/rclone/rclone.conf`.
+3. `.env` must contain **`DISCORD_WEBHOOK_URL`** (alerts) and
+   **`MARIADB_ROOT_PASSWORD`** (`mariadb-dump` of `luckperms`). Both are already
+   there after step 3.
+4. Enable the three timers. Only the timers: the services have no `[Install]` section.
+
+   ```bash
+   cd ~/mc
+   sudo cp systemd/trapaholics-*.service systemd/trapaholics-*.timer /etc/systemd/system/
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now trapaholics-backup.timer
+   sudo systemctl enable --now trapaholics-offload.timer
+   sudo systemctl enable --now trapaholics-prune-drive.timer
+   systemctl list-timers 'trapaholics-*'
+   ```
+
+5. Run one backup by hand and check that it works:
+   `sudo systemctl start trapaholics-backup.service && journalctl -u trapaholics-backup -n 50`.
+   Practise a restore before opening (docs/BACKUPS.md, "Restore procedure").
 
 ---
 
@@ -262,10 +300,26 @@ docker compose up -d                        # apply compose/template changes
 ```
 
 - **Config templates:** files under `config/<service>/` are copied into the data
-  dir on start **only if the template is newer than the live file**. `${CFG_*}`
-  placeholders are filled from the environment. Files under
-  `config/patches/<service>/` are re-applied on every start. Make lasting
-  changes there (in git), not only on the live files.
+  dir on start, with `${CFG_*}` placeholders filled from the environment.
+  Files under `config/patches/<service>/` are re-applied on **every** start.
+  Make lasting changes in git, not only on the live files.
+
+> ⚠️ **Template sync only copies a template that is newer than the live file.**
+> After a `git pull`, a changed template is usually newer and gets copied. But
+> if the live file was modified more recently (by you, or by a plugin rewriting
+> its config), the template is **silently skipped**. That matters for
+> `config/velocity/velocity.toml` (e.g. `haproxy-protocol` when switching to
+> frp in Phase 2) and the PlotSquared `worlds.yml` seed. To apply a changed
+> template, remove the live copy and restart the service. The template is then copied in fresh:
+>
+> ```bash
+> rm velocity/velocity.toml && docker compose restart velocity
+> ```
+>
+> Or edit the live file by hand to match. Check the result with
+> `docker compose logs velocity | grep -i interpolat` and by reading the live file.
+> Settings applied through `config/patches/` (Velocity forwarding in Paper,
+> generators, FAWE limits) don't have this problem.
 - **Velocity forwarding secret:** comes from `VELOCITY_FORWARDING_SECRET` (env) on
   all three servers. `velocity/forwarding.secret` is ignored.
 - **Bumping versions:** change the pin (image tag, `PAPER_BUILD`, Modrinth
