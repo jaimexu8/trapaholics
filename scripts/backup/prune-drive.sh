@@ -6,13 +6,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${SCRIPT_DIR}/lib.sh"
 
-backup_load_config
-backup_ensure_dirs
+backup_load_config || exit 1
+backup_ensure_dirs || exit 1
+backup_warn_missing_webhook
 
-exec 202>"$PRUNE_LOCK_FILE"
-if ! flock -n 202; then
-  log_warn "Another prune is already running; exiting"
-  exit 0
+# Hold the offload lock while rewriting .uploaded.log so offload can't append mid-prune.
+if ! acquire_offload_lock "$OFFLOAD_LOCK_WAIT_SEC"; then
+  exit 1
 fi
 
 main() {

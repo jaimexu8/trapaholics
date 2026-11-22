@@ -6,20 +6,28 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "${SCRIPT_DIR}/lib.sh"
 
-backup_load_config
-backup_ensure_dirs
+backup_load_config || exit 1
+backup_ensure_dirs || exit 1
+backup_warn_missing_webhook
 
 # Single-flight: don't overlap with another backup run.
-exec 200>"$LOCK_FILE"
-if ! flock -n 200; then
-  log_warn "Another backup is already running; exiting"
-  exit 0
+if ! acquire_backup_lock; then
+  # Alert already sent by acquire_backup_lock
+  exit 1
 fi
 
 cleanup() {
-  # Always restore autosave (B: trap save-on).
+  local rc=$?
+  trap - EXIT
+  # Always restore autosave.
   paper_save_on || true
   rm -rf "${REPO_ROOT}/.backup-staging" "$STAGING_DIR" 2>/dev/null || true
+  # Any non-zero exit that hasn't already alerted gets a Discord alert.
+  if [[ "$rc" -ne 0 && "${ALERT_SENT:-0}" -eq 0 ]]; then
+    discord_alert "backup failure" \
+      "backup.sh exited ${rc} on $(hostname -s 2>/dev/null || hostname). Check journalctl -u trapaholics-backup.service" || true
+  fi
+  exit "$rc"
 }
 trap cleanup EXIT
 
@@ -37,7 +45,8 @@ main() {
   local archive
   if ! archive="$(backup_create_archive)"; then
     log_error "Backup archive creation failed"
-    discord_alert "backup failure" "Archive creation failed on $(hostname). Check journalctl -u trapaholics-backup.service"
+    discord_alert "backup failure" \
+      "Archive creation failed on $(hostname -s 2>/dev/null || hostname). Check journalctl -u trapaholics-backup.service"
     exit 1
   fi
 

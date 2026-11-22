@@ -12,12 +12,76 @@ TRAPAHOLICS_BACKUP_LIB_LOADED=1
 _lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKUP_CONF="${BACKUP_CONF:-${_lib_dir}/backup.conf}"
 
+# Set when discord_alert successfully queues/sends (or intentionally skipped after
+# attempting); backup.sh EXIT handler uses this to avoid duplicate alerts.
+ALERT_SENT=0
+
+# Archive basename pattern (and optional .sha256 companion).
+ARCHIVE_NAME_RE='^trapaholics-[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{4}\.tar\.zst$'
+ARCHIVE_OR_SHA_RE='^trapaholics-[0-9]{4}-[0-9]{2}-[0-9]{2}_[0-9]{4}\.tar\.zst(\.sha256)?$'
+
 # ---------------------------------------------------------------------------
 # Config + env
 # ---------------------------------------------------------------------------
 
+# Tunables that may be overridden via the process environment. Snapshot values
+# BEFORE sourcing backup.conf — assigning to an exported var updates the env,
+# so printenv after `source backup.conf` would see the conf value, not the
+# caller's override.
+_BACKUP_OVERRIDE_KEYS=(
+  REPO_ROOT BACKUP_SUBDIR BACKUP_DIR ENV_FILE STAGING_DIR
+  SAFETY_MARGIN_BYTES BACKUP_SIZE_MULTIPLIER
+  RCLONE_REMOTE RCLONE_BWLIMIT
+  OFFLOAD_AGE_HOURS PRUNE_AGE_DAYS PRUNE_SAFETY_MIN_AGE_DAYS
+  OFFLOAD_FAIL_ALERT_THRESHOLD PAPER_CONTAINERS
+  MARIADB_CONTAINER MARIADB_DATABASE
+  BACKUP_EXCLUDES BACKUP_INCLUDE_PATHS
+  DOCKER_TIMEOUT_SEC OFFLOAD_LOCK_WAIT_SEC
+  LOCK_NAME OFFLOAD_LOCK_NAME PRUNE_LOCK_NAME
+  UPLOADED_LOG_NAME OFFLOAD_FAIL_COUNT_NAME
+  DOCKER_BIN RCLONE_BIN TAR_BIN ZSTD_BIN DF_BIN DATE_BIN CURL_BIN TIMEOUT_BIN FLOCK_BIN
+  SHA256SUM_BIN
+)
+
+_backup_snapshot_env_overrides() {
+  _BACKUP_OVERRIDE_SNAPSHOT=()
+  local key val
+  for key in "${_BACKUP_OVERRIDE_KEYS[@]}"; do
+    if val="$(printenv "$key" 2>/dev/null)"; then
+      _BACKUP_OVERRIDE_SNAPSHOT+=("${key}=${val}")
+    fi
+  done
+}
+
+_backup_apply_env_overrides() {
+  local entry key val
+  for entry in "${_BACKUP_OVERRIDE_SNAPSHOT[@]+"${_BACKUP_OVERRIDE_SNAPSHOT[@]}"}"; do
+    key="${entry%%=*}"
+    val="${entry#*=}"
+    printf -v "$key" '%s' "$val"
+  done
+}
+
+backup_validate_rclone_remote() {
+  local remote="${RCLONE_REMOTE:-}"
+  if [[ -z "$remote" ]]; then
+    log_error "RCLONE_REMOTE is empty; refusing to continue"
+    return 1
+  fi
+  # Must be gdrive-crypt: or gdrive-crypt:<subpath>
+  if [[ ! "$remote" =~ ^gdrive-crypt: ]]; then
+    log_error "RCLONE_REMOTE must match gdrive-crypt: or gdrive-crypt:<subpath> (got '${remote}')"
+    return 1
+  fi
+  return 0
+}
+
 backup_load_config() {
-  # Defaults (overridden by backup.conf)
+  # Snapshot exported overrides BEFORE any assignment (conf/defaults would
+  # clobber the environment for exported names).
+  _backup_snapshot_env_overrides
+
+  # Defaults (overridden by backup.conf, then by snapshotted env)
   REPO_ROOT=""
   BACKUP_SUBDIR="backups"
   SAFETY_MARGIN_BYTES=$((5 * 1024 * 1024 * 1024))
@@ -31,8 +95,10 @@ backup_load_config() {
   PAPER_CONTAINERS="survival creative"
   MARIADB_CONTAINER="mariadb"
   MARIADB_DATABASE="luckperms"
-  BACKUP_EXCLUDES="libraries cache versions logs/*.log.gz"
+  BACKUP_EXCLUDES="survival/libraries survival/cache survival/versions creative/libraries creative/cache creative/versions velocity/libraries survival/logs/*.log.gz creative/logs/*.log.gz"
   BACKUP_INCLUDE_PATHS="velocity survival creative config scripts docker-compose.yml .env frpc.toml relay"
+  DOCKER_TIMEOUT_SEC=60
+  OFFLOAD_LOCK_WAIT_SEC=3600
   LOCK_NAME=".backup.lock"
   OFFLOAD_LOCK_NAME=".offload.lock"
   PRUNE_LOCK_NAME=".prune.lock"
@@ -45,6 +111,8 @@ backup_load_config() {
   else
     log_warn "backup.conf not found at ${BACKUP_CONF}; using built-in defaults"
   fi
+
+  _backup_apply_env_overrides
 
   if [[ -z "${REPO_ROOT}" ]]; then
     REPO_ROOT="$(cd "${_lib_dir}/../.." && pwd)"
@@ -63,7 +131,6 @@ backup_load_config() {
   # shellcheck disable=SC2034
   PRUNE_LOCK_FILE="${BACKUP_DIR}/${PRUNE_LOCK_NAME}"
 
-  # Allow tests / callers to override external tools via env.
   DOCKER_BIN="${DOCKER_BIN:-docker}"
   RCLONE_BIN="${RCLONE_BIN:-rclone}"
   TAR_BIN="${TAR_BIN:-tar}"
@@ -71,6 +138,41 @@ backup_load_config() {
   DF_BIN="${DF_BIN:-df}"
   DATE_BIN="${DATE_BIN:-date}"
   CURL_BIN="${CURL_BIN:-curl}"
+  TIMEOUT_BIN="${TIMEOUT_BIN:-timeout}"
+  FLOCK_BIN="${FLOCK_BIN:-flock}"
+  if command -v sha256sum >/dev/null 2>&1; then
+    SHA256SUM_BIN="${SHA256SUM_BIN:-sha256sum}"
+  else
+    SHA256SUM_BIN="${SHA256SUM_BIN:-shasum}"
+  fi
+
+  # Re-apply snapshotted overrides after tool defaults (BACKUP_DIR etc. may need
+  # the overridden REPO_ROOT from the first apply — recompute derived paths).
+  _backup_apply_env_overrides
+  BACKUP_DIR="${BACKUP_DIR:-${REPO_ROOT}/${BACKUP_SUBDIR}}"
+  ENV_FILE="${ENV_FILE:-${REPO_ROOT}/.env}"
+  STAGING_DIR="${STAGING_DIR:-${BACKUP_DIR}/.staging}"
+  UPLOADED_LOG="${BACKUP_DIR}/${UPLOADED_LOG_NAME}"
+  OFFLOAD_FAIL_COUNT_FILE="${BACKUP_DIR}/${OFFLOAD_FAIL_COUNT_NAME}"
+  # shellcheck disable=SC2034
+  LOCK_FILE="${BACKUP_DIR}/${LOCK_NAME}"
+  # shellcheck disable=SC2034
+  OFFLOAD_LOCK_FILE="${BACKUP_DIR}/${OFFLOAD_LOCK_NAME}"
+  # Retained for config compatibility; prune holds the offload lock instead.
+  # shellcheck disable=SC2034
+  PRUNE_LOCK_FILE="${BACKUP_DIR}/${PRUNE_LOCK_NAME}"
+
+  if ! backup_validate_rclone_remote; then
+    return 1
+  fi
+}
+
+# Warn once at startup if the webhook is unset (still continue).
+backup_warn_missing_webhook() {
+  local webhook=""
+  if ! backup_get_env DISCORD_WEBHOOK_URL webhook || [[ -z "$webhook" ]]; then
+    log_warn "DISCORD_WEBHOOK_URL unset; Discord alerts disabled"
+  fi
 }
 
 # Read KEY=value from .env without sourcing the whole file. Strips surrounding quotes.
@@ -113,7 +215,7 @@ log_error() { printf '%s [ERROR] %s\n'  "$(_ts)" "$*" >&2; }
 _ts() { "$DATE_BIN" -u '+%Y-%m-%dT%H:%M:%SZ'; }
 
 # ---------------------------------------------------------------------------
-# Discord alerts (webhook URL never logged)
+# Discord alerts (webhook URL never logged / never on argv)
 # ---------------------------------------------------------------------------
 
 # discord_alert <title> <message>
@@ -124,17 +226,25 @@ discord_alert() {
   backup_get_env DISCORD_WEBHOOK_URL webhook || true
   if [[ -z "$webhook" ]]; then
     log_warn "DISCORD_WEBHOOK_URL unset; skipping Discord alert: ${title}"
+    # Count as "handled" so EXIT doesn't double-warn for the same failure path
+    # when the caller already decided to alert; callers set ALERT_SENT explicitly
+    # for hard failures. Here we do NOT set ALERT_SENT — backup EXIT still alerts.
     return 0
   fi
-  local payload
-  payload="$(printf '{"content":"%s"}' \
-    "$(printf '%s\n%s' "**trapaholics backup:** ${title}" "${message}" \
-      | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e ':a;N;$!ba;s/\n/\\n/g')")"
-  if ! "$CURL_BIN" -fsS -H 'Content-Type: application/json' \
-      -d "$payload" "$webhook" >/dev/null; then
+  local body payload
+  # Portable JSON-ish escape (GNU and BSD sed): backslash, quotes, then newlines.
+  body="$(printf '%s\n%s' "**trapaholics backup:** ${title}" "${message}" \
+    | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' | awk '{printf "%s\\n", $0}' | sed 's/\\n$//')"
+  payload="$(printf '{"content":"%s"}' "$body")"
+  # Pass URL via curl config on stdin so it never appears in ps.
+  if ! printf 'url = "%s"\n' "$webhook" | "$CURL_BIN" -fsS -K - \
+      -H 'Content-Type: application/json' \
+      -d "$payload" >/dev/null; then
     log_warn "Discord alert delivery failed (webhook URL not logged)"
     return 1
   fi
+  # shellcheck disable=SC2034
+  ALERT_SENT=1
   log_info "Discord alert sent: ${title}"
   return 0
 }
@@ -144,8 +254,8 @@ discord_alert() {
 # ---------------------------------------------------------------------------
 
 backup_ensure_dirs() {
-  mkdir -p "$BACKUP_DIR" "$STAGING_DIR"
-  chmod 700 "$BACKUP_DIR"
+  mkdir -p "$BACKUP_DIR" "$STAGING_DIR" || return 1
+  chmod 700 "$BACKUP_DIR" || return 1
 }
 
 # Free bytes on the filesystem that holds BACKUP_DIR.
@@ -155,7 +265,7 @@ backup_free_bytes() {
   "$DF_BIN" -Pk "$path" | awk 'NR==2 { print $4 * 1024 }'
 }
 
-# Bytes of live data that would go into a first backup (excludes mariadb/, data/).
+# Bytes of live data that would go into a first backup.
 backup_live_data_bytes() {
   local total=0
   local item path
@@ -177,7 +287,6 @@ backup_newest_archive_bytes() {
     printf '0'
     return 0
   fi
-  # Portable size
   wc -c <"$newest" | tr -d ' '
 }
 
@@ -186,26 +295,27 @@ backup_estimate_bytes() {
   local newest
   newest="$(backup_newest_archive_bytes)"
   if [[ "$newest" -gt 0 ]]; then
-    # awk for float multiply then truncate
     awk -v n="$newest" -v m="$BACKUP_SIZE_MULTIPLIER" 'BEGIN { printf "%d", n * m }'
   else
     backup_live_data_bytes
   fi
 }
 
-# List local archives oldest-first (full paths).
+# List local complete archives oldest-first by name (YYYY-MM-DD_HHMM sorts lexicographically).
+# Skips *.partial files.
 backup_list_archives() {
-  # Prefer null-safe find; sort by mtime then name.
-  find "$BACKUP_DIR" -maxdepth 1 -type f -name 'trapaholics-*.tar.zst' -print 2>/dev/null \
+  find "$BACKUP_DIR" -maxdepth 1 -type f -name 'trapaholics-*.tar.zst' ! -name '*.partial' -print 2>/dev/null \
     | while IFS= read -r f; do
-        printf '%s\t%s\n' "$(stat_mtime "$f")" "$f"
+        local base
+        base="$(basename "$f")"
+        if [[ "$base" =~ $ARCHIVE_NAME_RE ]]; then
+          printf '%s\n' "$f"
+        fi
       done \
-    | sort -n \
-    | cut -f2-
+    | sort
 }
 
 stat_mtime() {
-  # GNU stat first, then BSD.
   if stat -c '%Y' "$1" >/dev/null 2>&1; then
     stat -c '%Y' "$1"
   else
@@ -223,40 +333,67 @@ file_age_hours() {
 
 sha256_file() {
   local path="$1"
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$path" | awk '{print $1}'
+  if [[ "$(basename "$SHA256SUM_BIN")" == "shasum" ]]; then
+    "$SHA256SUM_BIN" -a 256 "$path" | awk '{print $1}'
   else
-    shasum -a 256 "$path" | awk '{print $1}'
+    "$SHA256SUM_BIN" "$path" | awk '{print $1}'
   fi
 }
 
 write_sha256() {
   local archive="$1"
-  local sum
-  sum="$(sha256_file "$archive")"
-  # Format compatible with sha256sum -c
-  printf '%s  %s\n' "$sum" "$(basename "$archive")" >"${archive}.sha256"
-  chmod 600 "${archive}.sha256"
+  local sum out
+  sum="$(sha256_file "$archive")" || return 1
+  out="${archive}.sha256"
+  # Checksum file names the final basename (not .partial).
+  printf '%s  %s\n' "$sum" "$(basename "$archive")" >"$out" || return 1
+  chmod 600 "$out" || return 1
+}
+
+# Verify archive against its .sha256 (portable: sha256sum -c or shasum -c).
+verify_sha256() {
+  local archive="$1"
+  local sumfile="${archive}.sha256"
+  local dir
+  if [[ ! -f "$sumfile" ]]; then
+    log_error "missing checksum file: ${sumfile}"
+    return 1
+  fi
+  dir="$(dirname "$archive")"
+  if [[ "$(basename "$SHA256SUM_BIN")" == "shasum" ]]; then
+    (cd "$dir" && "$SHA256SUM_BIN" -a 256 -c "$(basename "$sumfile")")
+  else
+    (cd "$dir" && "$SHA256SUM_BIN" -c "$(basename "$sumfile")")
+  fi
 }
 
 # ---------------------------------------------------------------------------
 # Docker / RCON helpers
 # ---------------------------------------------------------------------------
 
+# Run a command under timeout(1) when available.
+with_timeout() {
+  if command -v "$TIMEOUT_BIN" >/dev/null 2>&1 || [[ -x "$TIMEOUT_BIN" ]]; then
+    "$TIMEOUT_BIN" "$DOCKER_TIMEOUT_SEC" "$@"
+  else
+    "$@"
+  fi
+}
+
 container_running() {
   local name="$1"
   local state
-  state="$("$DOCKER_BIN" inspect -f '{{.State.Running}}' "$name" 2>/dev/null || true)"
+  state="$(with_timeout "$DOCKER_BIN" inspect -f '{{.State.Running}}' "$name" 2>/dev/null || true)"
   [[ "$state" == "true" ]]
 }
 
 rcon_cmd() {
   local container="$1"
   shift
-  "$DOCKER_BIN" exec "$container" rcon-cli "$@"
+  with_timeout "$DOCKER_BIN" exec "$container" rcon-cli "$@"
 }
 
-# Track which paper containers we successfully ran save-off on.
+# Track which paper containers we turned save-off on (for EXIT trap restore).
 SAVE_OFF_CONTAINERS=()
 
 paper_save_off() {
@@ -268,11 +405,12 @@ paper_save_off() {
       log_warn "container ${c} not running; skipping save-off"
       continue
     fi
-    log_info "RCON ${c}: save-off"
-    rcon_cmd "$c" save-off
-    log_info "RCON ${c}: save-all flush"
-    rcon_cmd "$c" save-all flush
+    # Register BEFORE save-off so a later save-all flush failure still gets save-on.
     SAVE_OFF_CONTAINERS+=("$c")
+    log_info "RCON ${c}: save-off"
+    rcon_cmd "$c" save-off || return 1
+    log_info "RCON ${c}: save-all flush"
+    rcon_cmd "$c" save-all flush || return 1
   done
 }
 
@@ -302,16 +440,25 @@ mariadb_dump_to() {
     log_warn "container ${MARIADB_CONTAINER} not running; skipping DB dump"
     return 0
   fi
-  if ! backup_get_env MARIADB_ROOT_PASSWORD password; then
+  if ! backup_get_env MARIADB_ROOT_PASSWORD password || [[ -z "$password" ]]; then
     log_error "MARIADB_ROOT_PASSWORD missing from .env; cannot dump database"
     return 1
   fi
   log_info "Dumping ${MARIADB_DATABASE} from ${MARIADB_CONTAINER}"
-  # -pPASSWORD (no space). Password is not written to the journal.
-  "$DOCKER_BIN" exec "$MARIADB_CONTAINER" \
-    mariadb-dump -uroot -p"${password}" --single-transaction --databases "$MARIADB_DATABASE" \
-    >"$outfile"
-  chmod 600 "$outfile"
+  # Pass password via MYSQL_PWD env inside the container (not on argv / ps).
+  if ! with_timeout "$DOCKER_BIN" exec -e "MYSQL_PWD=${password}" "$MARIADB_CONTAINER" \
+      mariadb-dump -uroot --single-transaction --databases "$MARIADB_DATABASE" \
+      >"$outfile"; then
+    log_error "mariadb-dump failed"
+    rm -f "$outfile"
+    return 1
+  fi
+  if [[ ! -s "$outfile" ]]; then
+    log_error "mariadb-dump produced empty output"
+    rm -f "$outfile"
+    return 1
+  fi
+  chmod 600 "$outfile" || return 1
 }
 
 # ---------------------------------------------------------------------------
@@ -321,27 +468,38 @@ mariadb_dump_to() {
 backup_build_tar_args() {
   local -n _out="$1"
   _out=()
+  # GNU tar (Debian host) supports --anchored; BSD tar (macOS harness) does not.
+  if "$TAR_BIN" --help 2>&1 | grep -q -- '--anchored'; then
+    _out+=(--anchored)
+  fi
   local ex
   # shellcheck disable=SC2086
   for ex in $BACKUP_EXCLUDES; do
+    # Full paths relative to REPO_ROOT (e.g. survival/libraries) — never bare
+    # names like "data", which would strip world/plugin data directories.
     _out+=(--exclude="$ex")
   done
-  # Always exclude unused legacy data/ and live MariaDB datadir if somehow listed.
-  _out+=(--exclude='data' --exclude='mariadb' --exclude='backups')
 }
 
 # Create trapaholics-YYYY-MM-DD_HHMM.tar.zst + .sha256 in BACKUP_DIR.
-# Prints the archive path on stdout (last line); logs go to stderr via log_*.
+# Writes via .partial then mv -n. Prints the final archive path on stdout.
 backup_create_archive() {
-  local stamp name archive dump_abs
+  local stamp name archive partial dump_abs stage_link
   stamp="$("$DATE_BIN" -u '+%Y-%m-%d_%H%M')"
   name="trapaholics-${stamp}.tar.zst"
   archive="${BACKUP_DIR}/${name}"
+  partial="${archive}.partial"
   dump_abs="${STAGING_DIR}/${MARIADB_DATABASE}.sql"
+  stage_link="${REPO_ROOT}/.backup-staging"
 
-  rm -rf "$STAGING_DIR"
-  mkdir -p "$STAGING_DIR"
-  chmod 700 "$STAGING_DIR"
+  if [[ -e "$archive" ]]; then
+    log_error "archive already exists (same-minute rerun?): ${archive}"
+    return 1
+  fi
+
+  rm -rf "$STAGING_DIR" || return 1
+  mkdir -p "$STAGING_DIR" || return 1
+  chmod 700 "$STAGING_DIR" || return 1
 
   if ! mariadb_dump_to "$dump_abs"; then
     return 1
@@ -361,44 +519,64 @@ backup_create_archive() {
     fi
   done
 
-  # Stage dump so it appears at .backup-staging/<db>.sql inside the archive
-  # without putting staging under REPO_ROOT permanently.
-  local stage_link="${REPO_ROOT}/.backup-staging"
-  rm -rf "$stage_link"
+  rm -rf "$stage_link" || return 1
   if [[ -f "$dump_abs" ]]; then
-    mkdir -p "$stage_link"
-    cp -a "$dump_abs" "${stage_link}/${MARIADB_DATABASE}.sql"
+    mkdir -p "$stage_link" || return 1
+    cp -a "$dump_abs" "${stage_link}/${MARIADB_DATABASE}.sql" || return 1
     include_args+=(".backup-staging")
   else
     log_warn "No DB dump file; archive will not include MariaDB dump"
   fi
 
-  log_info "Creating archive ${name}"
-  # tar → zstd. Use -C REPO_ROOT so paths are relative.
   if [[ ${#include_args[@]} -eq 0 ]]; then
     log_error "nothing to archive under ${REPO_ROOT}"
     rm -rf "$stage_link"
     return 1
   fi
+
+  log_info "Creating archive ${name} (via .partial)"
+  rm -f "$partial"
   if ! "$TAR_BIN" -C "$REPO_ROOT" "${tar_excludes[@]}" -cf - "${include_args[@]}" \
-      | "$ZSTD_BIN" -T0 -q -o "$archive"; then
-    rm -f "$archive"
+      | "$ZSTD_BIN" -T0 -q -o "$partial"; then
+    rm -f "$partial"
     rm -rf "$stage_link"
     log_error "tar|zstd failed"
     return 1
   fi
-  rm -rf "$stage_link"
-  chmod 600 "$archive"
+  rm -rf "$stage_link" || true
+  chmod 600 "$partial" || { rm -f "$partial"; return 1; }
 
-  log_info "Verifying archive with zstd -t"
-  if ! "$ZSTD_BIN" -t "$archive"; then
-    log_error "zstd -t failed for ${name}"
-    rm -f "$archive"
+  log_info "Verifying partial archive with zstd -t"
+  if ! "$ZSTD_BIN" -t "$partial"; then
+    log_error "zstd -t failed for ${name}.partial"
+    rm -f "$partial"
     return 1
   fi
 
-  write_sha256 "$archive"
-  rm -rf "$STAGING_DIR"
+  # Checksum names the final basename; write beside .partial then rename both.
+  local sum
+  sum="$(sha256_file "$partial")" || { rm -f "$partial"; return 1; }
+  printf '%s  %s\n' "$sum" "$name" >"${partial}.sha256" || { rm -f "$partial" "${partial}.sha256"; return 1; }
+  chmod 600 "${partial}.sha256" || { rm -f "$partial" "${partial}.sha256"; return 1; }
+
+  if [[ -e "$archive" ]]; then
+    log_error "refusing to overwrite existing archive: ${archive}"
+    rm -f "$partial" "${partial}.sha256"
+    return 1
+  fi
+  if ! mv -n "$partial" "$archive"; then
+    log_error "mv -n failed (target exists?): ${archive}"
+    rm -f "$partial" "${partial}.sha256"
+    return 1
+  fi
+  if ! mv -n "${partial}.sha256" "${archive}.sha256"; then
+    log_error "mv -n failed for checksum file"
+    # Leave the final archive; operator can re-checksum. Remove only leftover partials.
+    rm -f "$partial" "${partial}.sha256"
+    return 1
+  fi
+
+  rm -rf "$STAGING_DIR" || true
   log_info "Archive ready: ${archive} ($(wc -c <"$archive" | tr -d ' ') bytes)"
   printf '%s\n' "$archive"
 }
@@ -411,6 +589,29 @@ rclone_bwlimit_args() {
   if [[ -n "${RCLONE_BWLIMIT}" ]]; then
     printf -- '--bwlimit=%s' "$RCLONE_BWLIMIT"
   fi
+}
+
+# Acquire the offload lock on FD 201. Args: wait seconds (0 = non-blocking).
+# On non-blocking failure: alert and return 1 (caller decides exit code).
+acquire_offload_lock() {
+  local wait_sec="${1:-0}"
+  exec 201>"$OFFLOAD_LOCK_FILE"
+  if [[ "$wait_sec" -gt 0 ]]; then
+    if ! "$FLOCK_BIN" -w "$wait_sec" 201; then
+      log_error "Could not acquire offload lock within ${wait_sec}s"
+      discord_alert "offload lock timeout" \
+        "Failed to acquire ${OFFLOAD_LOCK_FILE} within ${wait_sec}s"
+      return 1
+    fi
+  else
+    if ! "$FLOCK_BIN" -n 201; then
+      log_warn "Another offload/backup-offload holds the lock"
+      discord_alert "offload lock held" \
+        "Offload lock ${OFFLOAD_LOCK_FILE} is held; this run is skipping."
+      return 1
+    fi
+  fi
+  return 0
 }
 
 # offload_archive <local-tar.zst-path>
@@ -430,6 +631,27 @@ offload_archive() {
   fi
   base="$(basename "$archive")"
 
+  if [[ "$base" == *.partial ]]; then
+    log_warn "offload: skipping partial file ${base}"
+    return 1
+  fi
+  if [[ ! "$base" =~ $ARCHIVE_NAME_RE ]]; then
+    log_warn "offload: skipping non-matching filename ${base}"
+    return 1
+  fi
+  if [[ ! -f "${archive}.sha256" ]]; then
+    log_error "offload: missing ${base}.sha256; refusing to upload"
+    return 1
+  fi
+  if ! verify_sha256 "$archive"; then
+    log_error "offload: sha256 check failed for ${base}; refusing to upload"
+    _offload_fail_bump "sha256 check failed for ${base}"
+    return 1
+  fi
+
+  # Bump mtime to upload time so Drive safety-net age tracks upload, not creation.
+  touch "$archive" || log_warn "touch failed on ${base} before upload"
+
   log_info "Uploading ${base} → ${RCLONE_REMOTE}"
   if ! "$RCLONE_BIN" copy "$archive" "$RCLONE_REMOTE" "${remote_args[@]+"${remote_args[@]}"}"; then
     log_error "rclone copy failed for ${base}"
@@ -437,7 +659,6 @@ offload_archive() {
     return 1
   fi
 
-  # Also upload the checksum file (not encrypted content of interest, but useful).
   if [[ -f "${archive}.sha256" ]]; then
     if ! "$RCLONE_BIN" copy "${archive}.sha256" "$RCLONE_REMOTE" "${remote_args[@]+"${remote_args[@]}"}"; then
       log_warn "rclone copy of ${base}.sha256 failed (continuing; cryptcheck is authoritative)"
@@ -482,7 +703,6 @@ _offload_fail_reset() {
 }
 
 # Offload a single oldest local archive, ignoring the 24h age rule.
-# Returns 1 if nothing to offload or upload failed.
 offload_oldest_one() {
   local oldest
   oldest="$(backup_list_archives | head -n1 || true)"
@@ -516,13 +736,24 @@ offload_aged() {
 # ---------------------------------------------------------------------------
 
 # Ensure free space >= estimate + safety margin by offloading oldest archives.
-# Returns 0 if enough space, 1 if not (after attempting offloads).
+# Holds the offload lock while attempting offloads so we don't race hourly offload.
 backup_ensure_space() {
   local estimate needed free
   estimate="$(backup_estimate_bytes)"
   needed=$((estimate + SAFETY_MARGIN_BYTES))
   free="$(backup_free_bytes)"
   log_info "Space check: free=${free} estimate=${estimate} margin=${SAFETY_MARGIN_BYTES} needed=${needed}"
+
+  if [[ "$free" -ge "$needed" ]]; then
+    return 0
+  fi
+
+  # Serialize with hourly offload while we move files.
+  if ! acquire_offload_lock "$OFFLOAD_LOCK_WAIT_SEC"; then
+    discord_alert "backup skipped (low disk)" \
+      "Needed ${needed} bytes, free ${free}, and could not acquire offload lock."
+    return 1
+  fi
 
   while [[ "$free" -lt "$needed" ]]; do
     log_warn "Insufficient free space (${free} < ${needed}); offloading oldest local backup"
@@ -542,10 +773,17 @@ backup_ensure_space() {
 # Prune Drive
 # ---------------------------------------------------------------------------
 
+# True if rclone stderr/stdout indicates the remote object was already gone.
+_rclone_not_found() {
+  local output="$1"
+  grep -qiE 'not found|directory not found|object not found|404' <<<"$output"
+}
+
 # Parse uploaded log; delete remote files with upload time >= PRUNE_AGE_DAYS ago.
+# Caller should hold the offload lock while rewriting the log.
 prune_drive_from_log() {
   local tmp
-  local line fname uploaded_at uploaded_epoch cutoff now
+  local line fname uploaded_at uploaded_epoch cutoff now rc out
   now="$("$DATE_BIN" +%s)"
   cutoff=$((now - PRUNE_AGE_DAYS * 24 * 3600))
 
@@ -554,12 +792,19 @@ prune_drive_from_log() {
     return 0
   fi
 
-  tmp="$(mktemp)"
+  tmp="$(mktemp "${BACKUP_DIR}/.uploaded.log.tmp.XXXXXX")" || return 1
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ -z "$line" || "$line" =~ ^# ]] && continue
     fname="${line%% *}"
     uploaded_at="${line#* }"
-    uploaded_at="${uploaded_at%% *}"  # tolerate extra fields
+    uploaded_at="${uploaded_at%% *}"
+
+    if [[ ! "$fname" =~ $ARCHIVE_OR_SHA_RE ]]; then
+      log_warn "prune: skipping malformed filename in log: ${fname}"
+      printf '%s\n' "$line" >>"$tmp"
+      continue
+    fi
+
     uploaded_epoch="$(parse_utc_iso "$uploaded_at")" || {
       log_warn "unparseable upload time in log, keeping line: ${line}"
       printf '%s\n' "$line" >>"$tmp"
@@ -567,11 +812,16 @@ prune_drive_from_log() {
     }
     if [[ "$uploaded_epoch" -le "$cutoff" ]]; then
       log_info "Pruning Drive file ${fname} (uploaded ${uploaded_at})"
-      if ! "$RCLONE_BIN" deletefile "${RCLONE_REMOTE}${fname}" --drive-use-trash=false; then
-        log_error "Failed to delete ${fname} from Drive"
-        printf '%s\n' "$line" >>"$tmp"
-        discord_alert "prune failure" "rclone deletefile failed for ${fname}"
-        continue
+      out="$("$RCLONE_BIN" deletefile "${RCLONE_REMOTE}${fname}" --drive-use-trash=false 2>&1)" && rc=0 || rc=$?
+      if [[ "$rc" -ne 0 ]]; then
+        if _rclone_not_found "$out"; then
+          log_warn "prune: ${fname} already absent on Drive; dropping log line"
+        else
+          log_error "Failed to delete ${fname} from Drive: ${out}"
+          printf '%s\n' "$line" >>"$tmp"
+          discord_alert "prune failure" "rclone deletefile failed for ${fname}"
+          continue
+        fi
       fi
       # Best-effort delete companion checksum
       "$RCLONE_BIN" deletefile "${RCLONE_REMOTE}${fname}.sha256" --drive-use-trash=false 2>/dev/null || true
@@ -580,15 +830,17 @@ prune_drive_from_log() {
     fi
   done <"$UPLOADED_LOG"
 
-  mv "$tmp" "$UPLOADED_LOG"
+  mv "$tmp" "$UPLOADED_LOG" || return 1
   chmod 600 "$UPLOADED_LOG" 2>/dev/null || true
 }
 
 prune_drive_safety_net() {
-  log_info "Safety-net prune: rclone delete ${RCLONE_REMOTE} --min-age ${PRUNE_SAFETY_MIN_AGE_DAYS}d"
+  log_info "Safety-net prune: rclone delete ${RCLONE_REMOTE} --min-age ${PRUNE_SAFETY_MIN_AGE_DAYS}d (trapaholics archives only)"
   if ! "$RCLONE_BIN" delete "$RCLONE_REMOTE" \
       --min-age "${PRUNE_SAFETY_MIN_AGE_DAYS}d" \
-      --drive-use-trash=false; then
+      --drive-use-trash=false \
+      --include 'trapaholics-*.tar.zst' \
+      --include 'trapaholics-*.tar.zst.sha256'; then
     log_error "Safety-net prune failed"
     discord_alert "prune failure" "rclone delete --min-age ${PRUNE_SAFETY_MIN_AGE_DAYS}d failed"
     return 1
@@ -606,4 +858,16 @@ parse_utc_iso() {
   else
     return 1
   fi
+}
+
+# Acquire backup lock on FD 200. Non-blocking; alerts if held.
+acquire_backup_lock() {
+  exec 200>"$LOCK_FILE"
+  if ! "$FLOCK_BIN" -n 200; then
+    log_warn "Another backup is already running"
+    discord_alert "backup lock held" \
+      "Backup lock ${LOCK_FILE} is held; this run is skipping."
+    return 1
+  fi
+  return 0
 }
