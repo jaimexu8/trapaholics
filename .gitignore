@@ -2,12 +2,19 @@
 .env
 *.env
 !.env.example
+# Pinned plugin sources (no secrets) are tracked
+!scripts/plugins/versions.env
 rclone.conf
 
-# Server data (worlds, plugin data, logs, jars) — backed up by the backup system, not git
-data/
-velocity/*
-survival/*
-creative/*
-backups/
-mariadb/
+# Server data (worlds, plugin data, logs, jars) — backed up by the backup system, not git.
+# Tracked config templates for these live in config/<service>/ instead.
+/data/
+/velocity/
+/survival/
+/creative/
+/mariadb/
+/backups/
+
+# Plugin build output and source checkouts (scripts/build-plugins.sh)
+/plugins-built/
+/.build/
