@@ -1,0 +1,124 @@
+{
+  "file": "/data/plugins/FastAsyncWorldEdit/config.yml",
+  "ops": [
+    {
+      "$set": {
+        "path": "$['region-restrictions']",
+        "value": true,
+        "value-type": "bool"
+      }
+    },
+    {
+      "$set": {
+        "path": "$.limits.default['max-actions']",
+        "value": 1,
+        "value-type": "int"
+      }
+    },
+    {
+      "$set": {
+        "path": "$.limits.default['max-changes']",
+        "value": 100000,
+        "value-type": "int"
+      }
+    },
+    {
+      "$set": {
+        "path": "$.limits.default['max-checks']",
+        "value": 1000000,
+        "value-type": "int"
+      }
+    },
+    {
+      "$set": {
+        "path": "$.limits.default['max-fails']",
+        "value": 100000,
+        "value-type": "int"
+      }
+    },
+    {
+      "$set": {
+        "path": "$.limits.default['max-iterations']",
+        "value": 500,
+        "value-type": "int"
+      }
+    },
+    {
+      "$set": {
+        "path": "$.limits.default['max-entities']",
+        "value": 64,
+        "value-type": "int"
+      }
+    },
+    {
+      "$set": {
+        "path": "$.limits.default['max-radius']",
+        "value": 32,
+        "value-type": "int"
+      }
+    },
+    {
+      "$set": {
+        "path": "$.limits.default['max-super-pickaxe-size']",
+        "value": 3,
+        "value-type": "int"
+      }
+    },
+    {
+      "$set": {
+        "path": "$.limits.default['max-brush-radius']",
+        "value": 10,
+        "value-type": "int"
+      }
+    },
+    {
+      "$set": {
+        "path": "$.limits.default['max-butcher-radius']",
+        "value": 32,
+        "value-type": "int"
+      }
+    },
+    {
+      "$set": {
+        "path": "$.limits.default['max-blockstates']",
+        "value": 256,
+        "value-type": "int"
+      }
+    },
+    {
+      "$set": {
+        "path": "$.limits.default['max-history-mb']",
+        "value": 32,
+        "value-type": "int"
+      }
+    },
+    {
+      "$set": {
+        "path": "$.limits.default['max-expression-ms']",
+        "value": 50,
+        "value-type": "int"
+      }
+    },
+    {
+      "$put": {
+        "path": "$.limits",
+        "key": "builder",
+        "value": {
+          "max-actions": 2,
+          "max-changes": 2000000,
+          "max-checks": 10000000,
+          "max-fails": 2000000,
+          "max-iterations": 2000,
+          "max-entities": 512,
+          "max-radius": 128,
+          "max-super-pickaxe-size": 5,
+          "max-brush-radius": 32,
+          "max-butcher-radius": 128,
+          "max-blockstates": 4096,
+          "max-history-mb": 256,
+          "max-expression-ms": 100
+        }
+      }
+    }
+  ]
+}

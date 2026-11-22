@@ -1,20 +1,208 @@
+# trapaholics.net — Phase 1 network (see ARCHITECTURE.md §3, §5, §8, §9).
+#
+#   playit ──(shares velocity's netns)──► velocity:25565 ─┬─► survival:25565 (Paper 26.3)
+#                                                         └─► creative:25565 (Paper 26.2 + ViaVersion)
+#   velocity / survival / creative ──► mariadb:3306 (LuckPerms; `db` network is internal-only)
+#
+# No host ports are published: the only way in is the playit tunnel.
+# Secrets come from .env (see .env.example). Every image and server/plugin
+# version is pinned; never use `latest`.
+#
+# Data (gitignored, bind-mounted):    ./velocity ./survival ./creative ./mariadb
+# Tracked templates (read-only):      ./config/<service> -> synced into the data dir on
+#                                     start (only when the template is newer than the
+#                                     live file); ${CFG_*} placeholders are filled from
+#                                     the environment while copying.
+# Patches (read-only):                ./config/patches/<service> -> re-applied every start.
+# Source-built / CI jars (gitignored): ./plugins-built/<service> (scripts/build-plugins.sh)
+#                                     -> /plugins, copied into /data/plugins on start.
+
+name: trapaholics
+
+x-paper-common: &paper-common
+  image: itzg/minecraft-server:2026.11.0-java25
+  restart: unless-stopped
+  tty: true
+  stdin_open: true
+  networks: [mc, db]
+  depends_on:
+    mariadb:
+      condition: service_healthy
+
+x-paper-env: &paper-env
+  EULA: "TRUE"
+  TYPE: PAPER
+  TZ: Etc/UTC
+  USE_AIKAR_FLAGS: "true"
+  # Behind Velocity: Mojang auth happens at the proxy (online-mode=true there).
+  ONLINE_MODE: "FALSE"
+  ENABLE_WHITELIST: "FALSE"         # writes white-list=false (26.3 defaults it to true)
+  ENABLE_RCON: "true"
+  # Tracked templates: ./config/<svc> is mounted at /config and synced into /data.
+  COPY_CONFIG_DEST: /data
+  # JSON-path patches re-applied on every start (Velocity forwarding, generators...).
+  PATCH_DEFINITIONS: /patches
+  # Placeholders usable in templates/patches (prefix CFG_).
+  CFG_VELOCITY_FORWARDING_SECRET: ${VELOCITY_FORWARDING_SECRET:?set in .env}
+  # Modrinth plugins are pinned by immutable version ID; no transitive downloads.
+  MODRINTH_DOWNLOAD_DEPENDENCIES: none
+  # LuckPerms reads LUCKPERMS_* env vars as config overrides.
+  LUCKPERMS_STORAGE_METHOD: mariadb
+  LUCKPERMS_DATA_ADDRESS: mariadb:3306
+  LUCKPERMS_DATA_DATABASE: luckperms
+  LUCKPERMS_DATA_USERNAME: luckperms
+  LUCKPERMS_DATA_PASSWORD: ${LUCKPERMS_DB_PASSWORD:?set in .env}
+  LUCKPERMS_MESSAGING_SERVICE: sql
+
 services:
-  mc:
-    image: itzg/minecraft-server
-    environment:
-      EULA: "TRUE"
-      TYPE: "PAPER"
-      VERSION: "26.2"
-      MEMORY: "4G"
-    volumes:
-      - ./data:/data
-    ports:
-      - "25565:25565"
+  velocity:
+    image: itzg/mc-proxy:2026.11.2-java25
+    container_name: velocity
     restart: unless-stopped
+    tty: true
+    stdin_open: true
+    networks: [mc, db]
+    depends_on:
+      mariadb:
+        condition: service_healthy
+    environment:
+      TYPE: VELOCITY
+      VELOCITY_VERSION: "4.3.1"
+      VELOCITY_BUILD_ID: "45"
+      MEMORY: 512M
+      TZ: Etc/UTC
+      # Read natively by Velocity; takes precedence over forwarding.secret.
+      VELOCITY_FORWARDING_SECRET: ${VELOCITY_FORWARDING_SECRET:?set in .env}
+      # haproxy-protocol = true, so the health check must send a PROXY header too.
+      HEALTH_USE_PROXY: "true"
+      MINECRAFT_VERSION: "26.3"
+      MODRINTH_DOWNLOAD_DEPENDENCIES: none
+      MODRINTH_PROJECTS: |
+        luckperms:tamnmXad
+      LUCKPERMS_SERVER: velocity
+      LUCKPERMS_STORAGE_METHOD: mariadb
+      LUCKPERMS_DATA_ADDRESS: mariadb:3306
+      LUCKPERMS_DATA_DATABASE: luckperms
+      LUCKPERMS_DATA_USERNAME: luckperms
+      LUCKPERMS_DATA_PASSWORD: ${LUCKPERMS_DB_PASSWORD:?set in .env}
+      LUCKPERMS_MESSAGING_SERVICE: sql
+    volumes:
+      # itzg/mc-proxy hardcodes its data dir to /server (not /data).
+      - ./velocity:/server
+      - ./config/velocity:/config:ro
+
+  survival:
+    <<: *paper-common
+    container_name: survival
+    environment:
+      <<: *paper-env
+      VERSION: "26.3"
+      PAPER_BUILD: "258"
+      MEMORY: 6G
+      MOTD: "trapaholics survival"
+      DIFFICULTY: hard
+      MODE: survival
+      LEVEL: world
+      VIEW_DISTANCE: "10"
+      SIMULATION_DISTANCE: "8"
+      SPAWN_PROTECTION: "0"         # spawn is protected with WorldGuard instead
+      RCON_PASSWORD: ${RCON_PASSWORD_SURVIVAL:?set in .env}
+      LUCKPERMS_SERVER: survival
+      # LuckPerms 5.5.71, GriefPrevention 16.18.8, WorldEdit 7.4.6, WorldGuard 7.0.21,
+      # Chunky 1.5.66 (world pre-generation, admin-only; all declare 26.3).
+      # EssentialsX(+Spawn) dev and CoreProtect 25.0 come from plugins-built/survival.
+      # spark is built into Paper.
+      MODRINTH_PROJECTS: |
+        luckperms:b0mk8uS6
+        griefprevention:MtwPHMAS
+        worldedit:YFnqiUlL
+        worldguard:fiHLM6oY
+        chunky:RBuKjN4k
+    volumes:
+      - ./survival:/data
+      - ./config/survival:/config:ro
+      - ./config/patches/survival:/patches:ro
+      - ./plugins-built/survival:/plugins:ro
+
+  creative:
+    <<: *paper-common
+    container_name: creative
+    environment:
+      <<: *paper-env
+      # TEMPORARY: 26.2 until PlotSquared fixes #4960 (DEPLOY.md has the upgrade path).
+      VERSION: "26.2"
+      PAPER_BUILD: "135"
+      MEMORY: 4G
+      MOTD: "trapaholics creative"
+      MODE: creative
+      FORCE_GAMEMODE: "true"
+      DIFFICULTY: peaceful
+      SPAWN_MONSTERS: "false"
+      ALLOW_NETHER: "false"         # building server: no nether/end (the end via bukkit.yml patch)
+      # The main (spawn) world is the PlotSquared plot world; `build` is a Multiverse world.
+      LEVEL: plots
+      SPAWN_PROTECTION: "0"
+      RCON_PASSWORD: ${RCON_PASSWORD_CREATIVE:?set in .env}
+      LUCKPERMS_SERVER: creative
+      # All declare 26.2: ViaVersion 5.12.2, LuckPerms 5.5.71, FAWE 2.16.3,
+      # Multiverse-Core 5.8.2, WorldGuard 7.0.19 (7.0.20+ dropped 26.2),
+      # FastAsyncVoxelSniper 3.2.5, CoreProtect 24.1.
+      # PlotSquared 7.6.1 (source build) + EssentialsX dev come from plugins-built/creative.
+      MODRINTH_PROJECTS: |
+        viaversion:Fkfcr89K
+        luckperms:b0mk8uS6
+        fastasyncworldedit:lmHhJ4ZF
+        multiverse-core:de7TbcZG
+        worldguard:TtfwTyi6
+        fastasyncvoxelsniper:AnYq3r1h
+        coreprotect:3sehX6Sg
+    volumes:
+      - ./creative:/data
+      - ./config/creative:/config:ro
+      - ./config/patches/creative:/patches:ro
+      - ./plugins-built/creative:/plugins:ro
+
+  mariadb:
+    image: mariadb:12.3.3          # 12.3 = current MariaDB LTS series (`mariadb:lts`)
+    container_name: mariadb
+    restart: unless-stopped
+    networks: [db]
+    environment:
+      TZ: Etc/UTC
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?set in .env}
+      MARIADB_DATABASE: luckperms
+      MARIADB_USER: luckperms
+      MARIADB_PASSWORD: ${LUCKPERMS_DB_PASSWORD:?set in .env}
+      MARIADB_AUTO_UPGRADE: "1"
+    command:
+      - --innodb-buffer-pool-size=192M
+      - --max-connections=60
+      - --performance-schema=OFF
+    volumes:
+      - ./mariadb:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
 
   playit:
-    image: ghcr.io/playit-cloud/playit-agent:1.0
-    network_mode: "service:mc"
-    environment:
-      - SECRET_KEY=${PLAYIT_SECRET_KEY}
+    # >= 0.15.26 is required for PROXY protocol v2; 1.2.0 is the newest 1.x release.
+    image: ghcr.io/playit-cloud/playit-agent:1.2.0
+    container_name: playit
     restart: unless-stopped
+    # Shares velocity's network namespace, so the tunnel target is 127.0.0.1:25565.
+    network_mode: "service:velocity"
+    depends_on: [velocity]
+    environment:
+      - SECRET_KEY=${PLAYIT_SECRET_KEY:?set in .env}
+
+networks:
+  # Proxy <-> backends. Not `internal`, because the containers need outbound
+  # internet (Mojang auth, Paper/plugin downloads, the playit tunnel).
+  # No ports are published on the host.
+  mc:
+  # Database network: internal only (no route outside the host's Docker).
+  db:
+    internal: true

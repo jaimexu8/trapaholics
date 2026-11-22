@@ -1,0 +1,23 @@
+{
+  "file": "/data/bukkit.yml",
+  "ops": [
+    {
+      "$put": {
+        "path": "$",
+        "key": "worlds",
+        "value": {
+          "plots": {
+            "generator": "PlotSquared"
+          }
+        }
+      }
+    },
+    {
+      "$set": {
+        "path": "$.settings['allow-end']",
+        "value": false,
+        "value-type": "bool"
+      }
+    }
+  ]
+}
