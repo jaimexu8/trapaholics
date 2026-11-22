@@ -21,8 +21,21 @@ elif [[ -n "${1:-}" ]]; then
   exit 2
 fi
 
-# Non-blocking: if backup_ensure_space (or another offload) holds the lock, alert and exit.
+cleanup() {
+  local rc=$?
+  trap - EXIT
+  release_offload_lock || true
+  if [[ "$rc" -ne 0 && "${ALERT_SENT:-0}" -eq 0 ]]; then
+    discord_alert "offload failure" \
+      "offload.sh exited ${rc} on $(hostname -s 2>/dev/null || hostname)." || true
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
+
 if ! acquire_offload_lock 0; then
+  # Skip counted toward OFFLOAD_LOCK_SKIP_ALERT_THRESHOLD; no EXIT alert needed.
+  ALERT_SENT=1
   exit 1
 fi
 

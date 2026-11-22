@@ -233,7 +233,7 @@ Practise this from a Drive copy before launch, and periodically after.
    set +a
    docker compose up -d mariadb
    # wait until healthy, then:
-   docker exec -e "MYSQL_PWD=${MARIADB_ROOT_PASSWORD}" -i mariadb \
+   MYSQL_PWD="$MARIADB_ROOT_PASSWORD" docker exec -e MYSQL_PWD -i mariadb \
      mariadb -uroot < /home/jt/mc/.backup-staging/luckperms.sql
    docker compose up -d
    ```

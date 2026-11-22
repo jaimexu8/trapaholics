@@ -10,8 +10,20 @@ backup_load_config || exit 1
 backup_ensure_dirs || exit 1
 backup_warn_missing_webhook
 
-# Hold the offload lock while rewriting .uploaded.log so offload can't append mid-prune.
-if ! acquire_offload_lock "$OFFLOAD_LOCK_WAIT_SEC"; then
+cleanup() {
+  local rc=$?
+  trap - EXIT
+  release_offload_lock || true
+  if [[ "$rc" -ne 0 && "${ALERT_SENT:-0}" -eq 0 ]]; then
+    discord_alert "prune failure" \
+      "prune-drive.sh exited ${rc} on $(hostname -s 2>/dev/null || hostname)." || true
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
+
+# Wait budget stays well below unit TimeoutStartSec=1h.
+if ! acquire_offload_lock "$PRUNE_LOCK_WAIT_SEC"; then
   exit 1
 fi
 
