@@ -83,6 +83,9 @@ for v in MARIADB_ROOT_PASSWORD LUCKPERMS_DB_PASSWORD COREPROTECT_DB_PASSWORD \
          RCON_PASSWORD; do
   grep -q "^$v=." .env || echo "$v=$(openssl rand -hex 24)" >> .env
 done
+# Containers run as you (jt), so data dirs stay owned by you:
+grep -q '^HOST_UID=.' .env || echo "HOST_UID=$(id -u)" >> .env
+grep -q '^HOST_GID=.' .env || echo "HOST_GID=$(id -g)" >> .env
 chmod 600 .env
 diff <(grep -oE '^[A-Z_]+=' .env.example | sort) <(grep -oE '^[A-Z_]+=' .env | sort) \
   && echo "all variables present"
@@ -99,16 +102,21 @@ manager.
 ## 4. Create the data dirs (owned by you)
 
 If Docker creates missing bind-mount dirs itself, they end up owned by root.
-Create them yourself first. Geyser runs as uid/gid `1000:1000`, so `./geyser`
-must be writable by that user:
+Create them yourself first. `minecraft` and `geyser` run as `HOST_UID:HOST_GID`
+from `.env` (your `id -u`/`id -g`, set in step 3; jt is 1002 on the Debian host),
+so `./minecraft` and `./geyser` must be owned by you:
 
 ```bash
 cd ~/mc
 mkdir -p minecraft geyser mariadb
-# On the Debian host `jt` is usually uid 1000; if not, chown explicitly:
-sudo chown -R 1000:1000 geyser
-chmod -R u+rwX geyser
+sudo chown -R "$(id -u):$(id -g)" geyser minecraft
+chmod -R u+rwX geyser minecraft
 ```
+
+> **Already ran the old steps** (`sudo chown -R 1000:1000 geyser`, or containers
+> already wrote files as uid 1000)? Make sure `HOST_UID`/`HOST_GID` are in `.env`
+> (step 3), then reclaim the dirs and continue:
+> `sudo chown -R "$(id -u):$(id -g)" geyser minecraft`
 
 ## 5. Build the source-built / CI plugins
 
@@ -189,8 +197,8 @@ start. Geyser Standalone needs the **same** file next to its config:
 # After minecraft has created the key:
 cp minecraft/plugins/floodgate/key.pem geyser/key.pem
 chmod 600 minecraft/plugins/floodgate/key.pem geyser/key.pem
-# Ensure geyser (uid 1000) can still read it:
-sudo chown 1000:1000 geyser/key.pem geyser/config.yml
+# Geyser runs as you (HOST_UID:HOST_GID), so you must own both files:
+sudo chown "$(id -u):$(id -g)" geyser/key.pem geyser/config.yml
 docker compose up -d geyser
 docker compose logs geyser | grep -iE 'Done|error|exception'
 ```
@@ -543,8 +551,9 @@ docker compose up -d                        # apply compose/template changes
   dir on start when newer than the live file; `${CFG_*}` placeholders are filled.
   `config/patches/minecraft/` is re-applied on **every** start.
 - **Geyser config** is not managed by itzg — edit `geyser/config.yml` (seeded from
-  `config/geyser/config.yml`) and `docker compose restart geyser`. Geyser runs as
-  `1000:1000`; keep `./geyser` owned accordingly.
+  `config/geyser/config.yml`) and `docker compose restart geyser`. Geyser (and Paper)
+  run as `HOST_UID:HOST_GID` from `.env`; keep `./geyser` and `./minecraft` owned
+  by that user.
 - **Never tunnel RCON (25575).** It stays inside Docker (`docker exec minecraft rcon-cli`).
 - **Smoke test** (on a dev machine, never next to live data):
   `scripts/smoke/run-local.sh`. It refuses to run if `./minecraft`, `./geyser`,
