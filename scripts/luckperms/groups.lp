@@ -7,6 +7,13 @@
 # Contexts: world=survival | world=survival_nether | world=survival_the_end |
 #           world=creative. Nodes without a world context apply everywhere.
 # NO explicit false nodes (they beat admin's *).
+#
+# Multiverse 5 teleport (finer perms on by default for new installs):
+#   multiverse.teleport.self.w.<world>
+# Access: multiverse.access.<world>
+# Admin gamemode: mv.bypass.gamemode.* is covered by admin `*` (Core bypass).
+# Inventory bypass stays OFF (Multiverse-Inventories enable-bypass-permissions:
+# false) so admin `*` does NOT skip the survival/creative inventory swap.
 
 # --- groups ------------------------------------------------------------------
 lp creategroup builder
@@ -22,7 +29,7 @@ lp group builder setdisplayname Builder
 lp group admin setdisplayname Admin
 
 # =============================================================================
-# default — everyone. Minimal. NO FAWE / VoxelSniper anywhere.
+# default — everyone. Minimal. NO FAWE / VoxelSniper / WorldEdit anywhere.
 # =============================================================================
 # Chat / utilities (everywhere).
 lp group default permission set essentials.msg true
@@ -46,17 +53,18 @@ lp group default permission set essentials.sethome.multiple.default true
 lp group default permission set essentials.spawn true
 
 # /survival and /creative (bukkit aliases → mv tp <world>).
+# Multiverse 5 finer teleport: self + type w + world name.
 lp group default permission set multiverse.access.survival true
 lp group default permission set multiverse.access.survival_nether true
 lp group default permission set multiverse.access.survival_the_end true
 lp group default permission set multiverse.access.creative true
-lp group default permission set multiverse.teleport.self.survival true
-lp group default permission set multiverse.teleport.self.survival_nether true
-lp group default permission set multiverse.teleport.self.survival_the_end true
-lp group default permission set multiverse.teleport.self.creative true
+lp group default permission set multiverse.teleport.self.w.survival true
+lp group default permission set multiverse.teleport.self.w.survival_nether true
+lp group default permission set multiverse.teleport.self.w.survival_the_end true
+lp group default permission set multiverse.teleport.self.w.creative true
 lp group default permission set multiverse.core.list.worlds true
 
-# GriefPrevention claims — survival worlds only (plugin also disables creative).
+# GriefPrevention claims — survival worlds only (plugin Mode.creative=Disabled).
 lp group default permission set griefprevention.createclaims true world=survival
 lp group default permission set griefprevention.claims true world=survival
 lp group default permission set griefprevention.abandonallclaims true world=survival
@@ -75,6 +83,7 @@ lp group default permission set griefprevention.abandonallclaims true world=surv
 
 # =============================================================================
 # builder — inherits default; FAWE + FastAsyncVoxelSniper in world=creative ONLY.
+# No essentials.tp: that allows /tp to any player without asking (use /tpa).
 # =============================================================================
 lp group builder parent add default
 
@@ -87,8 +96,8 @@ lp group builder permission set fawe.permpack.basic true world=creative
 lp group builder permission set fawe.bypass.regions true world=creative
 lp group builder permission set voxelsniper.sniper true world=creative
 lp group builder permission set voxelsniper.brush.* true world=creative
+lp group builder permission set voxelsniper.% true world=creative
 lp group builder permission set essentials.speed true world=creative
-lp group builder permission set essentials.tp true world=creative
 
 # =============================================================================
 # admin — everything, everywhere.

@@ -1,6 +1,6 @@
 # Inventory groups (ARCHITECTURE.md §5.5). survival shares across overworld/nether/end;
-# creative is isolated. Share names match Multiverse-Inventories 5.3.x
-# (potion_effects, not the older alias "effects").
+# creative is isolated. Multiverse-Inventories 5.3.x accepts the aggregate share `all`
+# (inventory, armor, ender_chest, exp, health, hunger, potion_effects, …).
 groups:
   survival:
     worlds:
@@ -8,21 +8,9 @@ groups:
       - survival_nether
       - survival_the_end
     shares:
-      - inventory
-      - armor
-      - ender_chest
-      - exp
-      - health
-      - hunger
-      - potion_effects
+      - all
   creative:
     worlds:
       - creative
     shares:
-      - inventory
-      - armor
-      - ender_chest
-      - exp
-      - health
-      - hunger
-      - potion_effects
+      - all

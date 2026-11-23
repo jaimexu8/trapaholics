@@ -1,8 +1,9 @@
 # trapaholics.net — Phase 1 one-server stack (ARCHITECTURE.md §3, §5, §8, §9).
 #
-#   playit ──(shares minecraft's netns)──► minecraft:25565 (Paper 26.3)
-#              └─ Bedrock UDP 19132 ──► geyser (same netns; Geyser Standalone)
-#   minecraft ──► mariadb:3306 (LuckPerms + CoreProtect; `db` network internal-only)
+#   playit ──(shares minecraft's netns)──► 127.0.0.1:25565 (Paper)
+#        └─ Bedrock NetherNet ──────────► 172.28.10.10:{19132,19133} (geyser on mc net)
+#   geyser ──► minecraft:25565 (PROXY protocol)
+#   minecraft ──► mariadb:3306 (LuckPerms + CoreProtect; `db` internal-only)
 #
 # No host ports are published: the only way in is the playit tunnel.
 # Secrets come from .env (see .env.example). Every image and server/plugin
@@ -17,6 +18,8 @@
 # Source-built / CI jars (gitignored): ./plugins-built/minecraft|/geyser
 #                                     (scripts/build-plugins.sh)
 
+# `-p` and COMPOSE_PROJECT_NAME take precedence over this, which is how
+# scripts/smoke/run-local.sh runs as the separate project `trapaholics-smoke`.
 name: trapaholics
 
 services:
@@ -26,7 +29,10 @@ services:
     restart: unless-stopped
     tty: true
     stdin_open: true
-    networks: [mc, db]
+    networks:
+      mc:
+        ipv4_address: 172.28.10.2
+      db:
     depends_on:
       mariadb:
         condition: service_healthy
@@ -82,19 +88,24 @@ services:
       - ./config/patches/minecraft:/patches:ro
       - ./plugins-built/minecraft:/plugins:ro
 
-  # Shares minecraft's network namespace so playit can target 127.0.0.1:19132 for Bedrock
-  # and Geyser can reach Paper at 127.0.0.1:25565 (with PROXY protocol).
+  # On the normal `mc` network (NOT network_mode:service:minecraft) so a minecraft
+  # restart does not tear down Geyser's networking. Fixed IP so playit (in
+  # minecraft's netns) can target it without relying on Docker DNS.
   geyser:
     image: eclipse-temurin:21.0.9_10-jre-alpine
     container_name: geyser
     restart: unless-stopped
-    network_mode: "service:minecraft"
+    user: "1000:1000"
+    networks:
+      mc:
+        ipv4_address: 172.28.10.10
     depends_on:
-      - minecraft
+      minecraft:
+        condition: service_started
     working_dir: /data
     environment:
       TZ: Etc/UTC
-      JAVA_TOOL_OPTIONS: "-XX:UseSVE=0 -Xms256M -Xmx512M"
+      JAVA_TOOL_OPTIONS: "-Xms256M -Xmx512M"
     command:
       - java
       - -jar
@@ -134,18 +145,27 @@ services:
     image: ghcr.io/playit-cloud/playit-agent:1.2.0
     container_name: playit
     restart: unless-stopped
-    # Shares minecraft's network namespace: Java tunnel → 127.0.0.1:25565,
-    # Bedrock UDP tunnel → 127.0.0.1:19132 (Geyser in the same netns).
+    # Shares minecraft's network namespace: Java tunnel → 127.0.0.1:25565.
+    # Bedrock NetherNet tunnels target geyser's fixed IP 172.28.10.10 (see DEPLOY.md).
+    # restart: true re-attaches playit when minecraft is recreated.
     network_mode: "service:minecraft"
-    depends_on: [minecraft, geyser]
+    depends_on:
+      minecraft:
+        condition: service_started
+        restart: true
+      geyser:
+        condition: service_started
     environment:
       - SECRET_KEY=${PLAYIT_SECRET_KEY:?set in .env}
 
 networks:
-  # Game traffic between minecraft and (Phase 2) frpc. Not `internal`, because
-  # containers need outbound internet (Mojang auth, Paper/plugin downloads, playit).
+  # Game traffic. Fixed subnet so geyser keeps a stable IP for playit.
+  # Not `internal`: containers need outbound internet (Mojang, downloads, playit).
   # No ports are published on the host.
   mc:
+    ipam:
+      config:
+        - subnet: 172.28.10.0/24
   # Database network: internal only (no route outside the host's Docker).
   db:
     internal: true

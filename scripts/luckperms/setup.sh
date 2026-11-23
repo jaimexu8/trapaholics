@@ -5,7 +5,7 @@
 #      through the minecraft console over RCON.
 #   2. Creates the Multiverse `creative` world (normal terrain, forced creative,
 #      peaceful, nether/end portals disabled) if missing; copies Paper per-world
-#      limits; protects spawn with WorldGuard placeholders noted in DEPLOY.md.
+#      limits; installs WorldGuard spawn regions for survival + creative.
 #   3. Ensures Multiverse-Inventories groups are loaded; prints LuckPerms result.
 #
 # Usage (from the repo root, stack running):
@@ -21,6 +21,8 @@ ROOT="$(cd "$HERE/../.." && pwd)"
 GROUPS_FILE="$HERE/groups.lp"
 MC_CONTAINER="${MC_CONTAINER:-minecraft}"
 DB_CONTAINER="${DB_CONTAINER:-mariadb}"
+# Host path of the minecraft /data bind mount (smoke test overrides it).
+MC_DATA_DIR="${MC_DATA_DIR:-$ROOT/minecraft}"
 DO_WORLD=1
 [[ "${1:-}" == "--no-world" ]] && DO_WORLD=0
 
@@ -33,6 +35,18 @@ rcon() {
   docker exec "$c" rcon-cli "$*" | sed 's/\x1b\[[0-9;]*m//g'
 }
 
+# rcon that must succeed (no silent failure). Multiverse prints errors to chat;
+# treat empty/error-looking replies as failure when verifying.
+rcon_ok() {
+  local c="$1"; shift
+  local out
+  out="$(rcon "$c" "$@")" || die "rcon failed: $*"
+  printf '%s\n' "$out"
+  if printf '%s' "$out" | grep -qiE 'unknown|error|failed|invalid|does not exist|not found'; then
+    die "command looked failed: $* → $out"
+  fi
+}
+
 wait_ready() {
   local c="$1"
   for _ in $(seq 1 90); do
@@ -40,6 +54,39 @@ wait_ready() {
     sleep 5
   done
   die "$c did not answer RCON within ~7.5 minutes (is it running? docker compose ps)"
+}
+
+# Writes the spawn region from config/worldguard/spawn-regions.yml into a world's
+# WorldGuard regions.yml (only if that world has no `spawn` region yet). The
+# caller then runs `wg reload` and verifies the region round-trips (see below).
+install_wg_spawn() {
+  local world="$1"
+  local wg_dir="$MC_DATA_DIR/plugins/WorldGuard/worlds/$world"
+  local regions="$wg_dir/regions.yml"
+  local template="$ROOT/config/worldguard/spawn-regions.yml"
+  local unit
+
+  [[ -f "$template" ]] || die "missing $template"
+  mkdir -p "$wg_dir"
+  if [[ -f "$regions" ]] && grep -qE '^ +spawn:' "$regions"; then
+    echo "WorldGuard spawn region already present in $world"
+    return 0
+  fi
+  # No file, or a file with no regions (`regions: {}` / bare `regions:`): use the
+  # template as-is. Otherwise append the template's spawn block under regions:,
+  # re-indented to the file's indent unit (WorldGuard itself writes 4 spaces).
+  if [[ ! -f "$regions" ]] || ! grep -qE '^ +[^ #]' "$regions"; then
+    cp "$template" "$regions"
+  else
+    grep -qE '^regions:[[:space:]]*$' "$regions" \
+      || die "unexpected layout in $regions; add the spawn region by hand (DEPLOY step 10)"
+    unit="$(grep -m1 -oE '^ +' "$regions")"
+    sed -n '/^  spawn:/,$p' "$template" | awk -v u="$unit" '{
+      match($0, /^ */); n = RLENGTH / 2; pre = ""
+      for (i = 0; i < n; i++) pre = pre u
+      print pre substr($0, RLENGTH + 1) }' >>"$regions"
+  fi
+  echo "Wrote WorldGuard spawn region for $world -> $regions"
 }
 
 [[ -f "$GROUPS_FILE" ]] || die "missing $GROUPS_FILE"
@@ -56,43 +103,86 @@ if (( DO_WORLD )); then
     echo "World 'creative' already exists"
   else
     log "Creating Multiverse world 'creative' (normal terrain; takes a while)"
-    rcon "$MC_CONTAINER" mv create creative normal
+    rcon_ok "$MC_CONTAINER" mv create creative normal
   fi
 
   log "Configuring creative world (gamemode creative, peaceful, no nether/end portals)"
   # Multiverse-Core 5: mv modify [world] set <property> <value>
-  rcon "$MC_CONTAINER" mv modify creative set gamemode creative
-  rcon "$MC_CONTAINER" mv modify creative set difficulty peaceful
-  rcon "$MC_CONTAINER" mv modify creative set pvp false
-  rcon "$MC_CONTAINER" mv modify creative set allow-flight true
-  rcon "$MC_CONTAINER" mv modify creative set hunger false
+  rcon_ok "$MC_CONTAINER" mv modify creative set gamemode creative
+  rcon_ok "$MC_CONTAINER" mv modify creative set difficulty peaceful
+  rcon_ok "$MC_CONTAINER" mv modify creative set pvp false
+  rcon_ok "$MC_CONTAINER" mv modify creative set allow-flight true
+  rcon_ok "$MC_CONTAINER" mv modify creative set hunger false
   # portal-form none blocks nether/end portal creation/use in this world.
-  rcon "$MC_CONTAINER" mv modify creative set portal-form none
-  # Multiverse-NetherPortals: unlink so any leftover links go nowhere.
-  rcon "$MC_CONTAINER" mvnp unlink nether creative || true
-  rcon "$MC_CONTAINER" mvnp unlink end creative || true
+  rcon_ok "$MC_CONTAINER" mv modify creative set portal-form none
 
-  # Paper per-world limits for creative (ARCHITECTURE §5.6).
-  paper_src="$ROOT/config/minecraft/creative-paper-world.yml"
-  paper_dst="$ROOT/minecraft/creative/paper-world.yml"
-  if [[ -f "$paper_src" ]]; then
-    mkdir -p "$(dirname "$paper_dst")"
-    cp "$paper_src" "$paper_dst"
-    echo "Wrote $paper_dst"
+  # Read back from Multiverse-Core's worlds.yml (`mv info` output is paginated).
+  mv_worlds="$MC_DATA_DIR/plugins/Multiverse-Core/worlds.yml"
+  [[ -f "$mv_worlds" ]] || die "missing $mv_worlds"
+  creative_cfg="$(awk '/^[^ #]/{p=($0 ~ /^(minecraft:)?creative:/)} p' "$mv_worlds")"
+  for kv in 'gamemode: creative' 'difficulty: peaceful' 'portal-form: none'; do
+    grep -qE "^  ${kv}\$" <<<"$creative_cfg" \
+      || die "creative world: expected '${kv}' in $mv_worlds after mv modify"
+  done
+  echo "creative read back: gamemode creative, difficulty peaceful, portal-form none"
+
+  # Multiverse-NetherPortals: unlink so any leftover links go nowhere.
+  # Fail loudly if the plugin is missing; "already unlinked" is OK.
+  unlink_n="$(rcon "$MC_CONTAINER" mvnp unlink nether creative)"
+  unlink_e="$(rcon "$MC_CONTAINER" mvnp unlink end creative)"
+  printf '%s\n%s\n' "$unlink_n" "$unlink_e"
+  if printf '%s\n%s' "$unlink_n" "$unlink_e" | grep -qiE 'unknown command|plugin.*not'; then
+    die "Multiverse-NetherPortals mvnp unavailable"
   fi
 
-  # Ensure Multiverse-Inventories has potion_effects on both groups (idempotent).
-  rcon "$MC_CONTAINER" mvinv add-shares survival potion_effects || true
-  rcon "$MC_CONTAINER" mvinv add-shares creative potion_effects || true
-  rcon "$MC_CONTAINER" mvinv reload || true
+  # Paper per-world limits for creative (ARCHITECTURE §5.6). Paper 26.3 keeps
+  # every dimension under the level folder (LEVEL=survival in compose). Keep the
+  # header + `_version` Paper wrote, then append our overrides (idempotent).
+  # Takes effect on the next minecraft restart (DEPLOY step 8).
+  paper_src="$ROOT/config/paper/creative-paper-world.yml"
+  paper_dst="$MC_DATA_DIR/survival/dimensions/minecraft/creative/paper-world.yml"
+  [[ -f "$paper_src" ]] || die "missing $paper_src"
+  [[ -f "$paper_dst" ]] || die "missing $paper_dst (Paper writes it when the world loads)"
+  grep -qE '^_version: [0-9]+$' "$paper_dst" || die "no _version line in $paper_dst"
+  { sed -n '1,/^_version:/p' "$paper_dst"; grep -vE '^[[:space:]]*#' "$paper_src"; } >"$paper_dst.new"
+  mv "$paper_dst.new" "$paper_dst"
+  echo "Wrote $paper_dst"
 
-  log "WorldGuard: define spawn regions in-game (see DEPLOY.md). Soft spawn protection note only."
+  # Multiverse-Inventories: groups.yml is seeded via /config sync with shares: [all].
+  # Reload so a live server picks up template changes; fail if mvinv is missing.
+  mvinv_out="$(rcon "$MC_CONTAINER" mvinv reload)"
+  printf '%s\n' "$mvinv_out"
+  ! printf '%s' "$mvinv_out" | grep -qiE 'unknown command|plugin.*not' \
+    || die "Multiverse-Inventories mvinv unavailable"
+
+  log "WorldGuard spawn regions (survival + creative)"
+  install_wg_spawn survival
+  install_wg_spawn creative
+  # `wg reload` reloads config + region data. WorldGuard's `rg` commands reply
+  # asynchronously (nothing comes back over RCON), so verify by round-trip:
+  # `rg save` rewrites regions.yml from memory (dropping our template comments);
+  # the spawn region with its flags must survive that.
+  wg_out="$(rcon "$MC_CONTAINER" wg reload)"
+  printf '%s\n' "$wg_out"
+  grep -qi 'reloaded' <<<"$wg_out" || die "wg reload failed: $wg_out"
+  for w in survival creative; do
+    rcon "$MC_CONTAINER" rg save -w "$w" >/dev/null
+  done
+  sleep 5
+  for w in survival creative; do
+    f="$MC_DATA_DIR/plugins/WorldGuard/worlds/$w/regions.yml"
+    if grep -q 'Template for WorldGuard' "$f" || ! grep -qE '^ +spawn:' "$f" \
+       || ! grep -q 'pvp: deny' "$f"; then
+      die "WorldGuard did not load the spawn region for $w (see $f)"
+    fi
+    echo "WorldGuard spawn region loaded in $w"
+  done
 fi
 
 log "Waiting for LuckPerms to finish writing"
 sleep 5
 log "LuckPerms groups in MariaDB"
-# shellcheck disable=SC2016  # $MARIADB_PASSWORD may be unset; use root + env from compose
+# shellcheck disable=SC2016  # passwords come from container env
 docker exec "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" luckperms -t -e "
   SELECT g.name AS \`group\`, COUNT(p.id) AS nodes
     FROM luckperms_groups g LEFT JOIN luckperms_group_permissions p ON p.name = g.name
@@ -101,9 +191,10 @@ docker exec "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" luc
     FROM luckperms_group_permissions
    WHERE permission LIKE \"group.%\" OR permission LIKE \"weight.%\" OR permission = \"*\"
       OR permission LIKE \"fawe.%\" OR permission LIKE \"voxelsniper.%\"
+      OR permission LIKE \"worldedit.%\"
    ORDER BY name, permission, world;"'
 
-log "Verifying: no explicit false nodes; builder FAWE only in world=creative"
+log "Verifying: no explicit false nodes; builder FAWE/Voxel only in world=creative; default has no edit tools"
 # shellcheck disable=SC2016
 false_count="$(docker exec "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -N luckperms -e "
   SELECT COUNT(*) FROM luckperms_group_permissions WHERE value = 0;"')"
@@ -116,6 +207,30 @@ bad_fawe="$(docker exec "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIADB_ROOT_P
      AND world <> \"creative\";"')"
 [[ "$bad_fawe" == "0" ]] || die "builder has $bad_fawe FAWE nodes outside world=creative"
 
-echo "OK: no false nodes; builder FAWE nodes are world=creative only"
+# shellcheck disable=SC2016
+bad_voxel="$(docker exec "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -N luckperms -e "
+  SELECT COUNT(*) FROM luckperms_group_permissions
+   WHERE name = \"builder\" AND permission LIKE \"voxelsniper.%\"
+     AND world <> \"creative\";"')"
+[[ "$bad_voxel" == "0" ]] || die "builder has $bad_voxel voxelsniper nodes outside world=creative"
+
+# shellcheck disable=SC2016
+default_edit="$(docker exec "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -N luckperms -e "
+  SELECT COUNT(*) FROM luckperms_group_permissions
+   WHERE name = \"default\" AND (
+     permission LIKE \"fawe.%\" OR permission LIKE \"worldedit.%\"
+     OR permission LIKE \"voxelsniper.%\"
+   );"')"
+[[ "$default_edit" == "0" ]] || die "default has $default_edit FAWE/WorldEdit/VoxelSniper nodes (must be zero)"
+
+# shellcheck disable=SC2016
+builder_voxel_pct="$(docker exec "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -N luckperms -e "
+  SELECT COUNT(*) FROM luckperms_group_permissions
+   WHERE name = \"builder\" AND permission = \"voxelsniper.%\" AND world = \"creative\";"')"
+[[ "$builder_voxel_pct" == "1" ]] || die "builder missing voxelsniper.% in world=creative"
+
+echo "OK: no false nodes; builder FAWE/Voxel creative-only; default has no edit tools"
 log "Done. In game / console:  lp listgroups   lp group builder permission info"
 echo "Promote a player:  docker exec $MC_CONTAINER rcon-cli \"lp user <name> parent add builder\""
+echo "Note: admin \`*\` includes mv.bypass.gamemode.* (keeps gamemode) but Multiverse-Inventories"
+echo "bypass is OFF so inventories still swap between survival and creative."

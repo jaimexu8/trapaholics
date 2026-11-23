@@ -1,0 +1,42 @@
+# Isolated smoke-test override. Used ONLY by scripts/smoke/run-local.sh:
+#   docker compose -p trapaholics-smoke -f docker-compose.yml -f scripts/smoke/docker-compose.smoke.yml
+#
+# - Never bind-mounts ./minecraft ./geyser ./mariadb: all data lives in the
+#   gitignored .smoke-data/ (deleted by the script on exit).
+# - No fixed container names (container_name is reset), so nothing can collide
+#   with or be mistaken for the production `minecraft` / `geyser` / `mariadb`.
+# - Reduced heaps. No extra JVM flags: production JAVA_TOOL_OPTIONS are used as-is
+#   apart from heap size.
+# - playit is never started (profile-gated, and the script never names it).
+
+services:
+  minecraft:
+    container_name: !reset null
+    environment:
+      MEMORY: 2G
+    volumes: !override
+      - ./.smoke-data/minecraft:/data
+      - ./config/minecraft:/config:ro
+      - ./config/patches/minecraft:/patches:ro
+      - ./plugins-built/minecraft:/plugins:ro
+
+  geyser:
+    container_name: !reset null
+    # Native platform of the smoke host (set by run-local.sh) so a cached
+    # foreign-arch image tag is never picked up by accident.
+    platform: ${SMOKE_PLATFORM:?set by run-local.sh}
+    environment:
+      JAVA_TOOL_OPTIONS: "-Xms128M -Xmx256M"
+    volumes: !override
+      - ./.smoke-data/geyser:/data
+      - ./plugins-built/geyser/Geyser-Standalone.jar:/opt/Geyser-Standalone.jar:ro
+
+  mariadb:
+    container_name: !reset null
+    volumes: !override
+      - ./.smoke-data/mariadb:/var/lib/mysql
+      - ./config/mariadb/init:/docker-entrypoint-initdb.d:ro
+
+  playit:
+    profiles: ["never-in-smoke"]
+    container_name: !reset null

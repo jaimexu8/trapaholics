@@ -1,0 +1,22 @@
+# Template for WorldGuard regions.yml (WorldGuard 7). setup.sh writes this into
+# minecraft/plugins/WorldGuard/worlds/<world>/regions.yml for survival and creative
+# if no spawn region exists yet, then runs `wg reload` and verifies it loaded.
+#
+# Cuboid around 0,0 covering typical spawn. Adjust min/max in-game with
+# /rg redefine spawn after you pick a real hub.
+regions:
+  spawn:
+    min: {x: -48, y: -64, z: -48}
+    max: {x: 48, y: 320, z: 48}
+    members: {}
+    flags:
+      pvp: deny
+      creeper-explosion: deny
+      other-explosion: deny
+      tnt: deny
+      fire-spread: deny
+      lava-fire: deny
+      mob-spawning: deny
+    owners: {}
+    type: cuboid
+    priority: 10
