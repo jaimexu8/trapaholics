@@ -1,0 +1,12 @@
+{
+  "file": "/data/plugins/Essentials/config.yml",
+  "ops": [
+    {
+      "$set": {
+        "path": "$['respawn-listener-priority']",
+        "value": "lowest",
+        "value-type": "string"
+      }
+    }
+  ]
+}
