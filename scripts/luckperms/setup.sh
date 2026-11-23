@@ -12,8 +12,10 @@
 #   scripts/luckperms/setup.sh            # everything
 #   scripts/luckperms/setup.sh --no-world # only LuckPerms groups
 #
-# Safe to run again at any time: groups are cleared and rebuilt from groups.lp;
-# player memberships are untouched; world steps are idempotent.
+# Safe to run again at any time: every node in groups.lp is (re)set in place, then
+# only nodes that are in MariaDB but NOT in groups.lp are unset (no `clear`, so a
+# live server never sees empty groups). Player memberships are untouched; world
+# steps are idempotent.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,6 +25,10 @@ MC_CONTAINER="${MC_CONTAINER:-minecraft}"
 DB_CONTAINER="${DB_CONTAINER:-mariadb}"
 # Host path of the minecraft /data bind mount (smoke test overrides it).
 MC_DATA_DIR="${MC_DATA_DIR:-$ROOT/minecraft}"
+# Waiting for LuckPerms' async MariaDB writes (tests shorten these).
+LP_WAIT_TIMEOUT="${LP_WAIT_TIMEOUT:-120}"
+LP_POLL_INTERVAL="${LP_POLL_INTERVAL:-2}"
+LP_STABLE_READS="${LP_STABLE_READS:-3}"
 DO_WORLD=1
 [[ "${1:-}" == "--no-world" ]] && DO_WORLD=0
 
@@ -128,13 +134,121 @@ check_false_nodes() {
   echo "false nodes: only admin mv.bypass.gamemode.* (${#ALLOWED_FALSE_NODES[@]} nodes)"
 }
 
+# db <mariadb flags...>  — runs the SQL on stdin against the luckperms database.
+db() {
+  # shellcheck disable=SC2016  # password comes from the container env
+  docker exec -i "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" "$@" luckperms' sh "$@"
+}
+
+# Expected group nodes from groups.lp as TSV `group<TAB>node<TAB>value<TAB>server<TAB>world`
+# (value 1/0, LuckPerms' storage form). setweight / setdisplayname / parent add are
+# nodes too (weight.N, displayname.X, group.P). Fails on anything it can't model.
+expected_nodes() {
+  awk '
+    function bad(why) { printf "groups.lp:%d: %s: %s\n", NR, why, $0 > "/dev/stderr"; err = 1 }
+    /^[[:space:]]*(#|$)/ || $1 != "lp" || $2 != "group" { next }
+    $4 == "setweight"      { print $3 "\tweight." $5 "\t1\tglobal\tglobal"; next }
+    $4 == "setdisplayname" { if (NF != 5) bad("display name with spaces unsupported")
+                             print $3 "\tdisplayname." $5 "\t1\tglobal\tglobal"; next }
+    $4 == "parent" && $5 == "add" && NF == 6 { print $3 "\tgroup." $6 "\t1\tglobal\tglobal"; next }
+    $4 == "permission" && $5 == "set" {
+      v = 1; i = 7
+      if ($7 == "true") i = 8
+      else if ($7 == "false") { v = 0; i = 8 }
+      s = "global"; w = "global"
+      for (; i <= NF; i++) {
+        if ($i ~ /^world=/) w = substr($i, 7)
+        else if ($i ~ /^server=/) s = substr($i, 8)
+        else bad("unsupported context " $i)
+      }
+      print $3 "\t" $6 "\t" v "\t" s "\t" w; next
+    }
+    { bad("unsupported command (setup.sh diffs nodes instead of clearing)") }
+    END { exit err }
+  ' "$GROUPS_FILE" | sort -u
+}
+
+# Current nodes of the groups named in groups.lp, same TSV form, sorted.
+current_nodes() {
+  local in
+  in="$(cut -f1 <<<"$EXPECTED" | sort -u | sed "s/.*/'&'/" | paste -sd, -)"
+  db -N -B <<SQL | sort -u
+SELECT name, permission, value, server, world FROM luckperms_group_permissions
+ WHERE name IN ($in);
+SQL
+}
+
+# missing_nodes <current>  — expected lines absent from current (value must match).
+missing_nodes() { comm -23 <(printf '%s\n' "$EXPECTED") <(printf '%s\n' "$1"); }
+
+# stale_nodes <current>  — current nodes whose group+node+server+world is not in
+# groups.lp at all (a value mismatch shows up as missing instead).
+stale_nodes() {
+  awk -F'\t' 'NR == FNR { want[$1 FS $2 FS $4 FS $5] = 1; next }
+              $1 != "" && !(($1 FS $2 FS $4 FS $5) in want)' \
+    <(printf '%s\n' "$EXPECTED") <(printf '%s\n' "$1")
+}
+
+# wait_lp_settled <require_no_stale 0|1>
+# LuckPerms writes to MariaDB asynchronously after the RCON commands return. Poll
+# until every groups.lp node is present (and, if asked, no stale node is left)
+# and the node set is unchanged across LP_STABLE_READS reads.
+wait_lp_settled() {
+  local strict="$1" cur sum last="" stable=0 missing stale elapsed=0
+  while :; do
+    cur="$(current_nodes)" || die "could not read LuckPerms nodes from $DB_CONTAINER"
+    missing="$(missing_nodes "$cur")"
+    stale=""
+    (( strict )) && stale="$(stale_nodes "$cur")"
+    sum="$(cksum <<<"$cur")"
+    if [[ -z "$missing" && -z "$stale" ]]; then
+      if [[ "$sum" == "$last" ]]; then stable=$((stable + 1)); else stable=1; fi
+      if (( stable >= LP_STABLE_READS )); then
+        echo "LuckPerms settled: $(grep -c . <<<"$cur") group nodes, all of groups.lp present"
+        return 0
+      fi
+    else
+      stable=0
+      printf '  waiting (%ss): %d missing, %d stale\n' "$elapsed" \
+        "$(grep -c . <<<"$missing")" "$(grep -c . <<<"$stale")"
+    fi
+    last="$sum"
+    if (( elapsed >= LP_WAIT_TIMEOUT )); then
+      [[ -z "$missing" ]] || printf 'missing node (group node value server world): %s\n' $'\n'"$missing" >&2
+      [[ -z "$stale" ]] || printf 'stale node still present: %s\n' $'\n'"$stale" >&2
+      die "LuckPerms did not settle in MariaDB within ${LP_WAIT_TIMEOUT}s"
+    fi
+    sleep "$LP_POLL_INTERVAL"
+    elapsed=$((elapsed + LP_POLL_INTERVAL))
+  done
+}
+
 [[ -f "$GROUPS_FILE" ]] || die "missing $GROUPS_FILE"
+EXPECTED="$(expected_nodes)" || die "cannot model $GROUPS_FILE (see above)"
+[[ -n "$EXPECTED" ]] || die "no group nodes in $GROUPS_FILE"
 
 log "Waiting for $MC_CONTAINER RCON"
 wait_ready "$MC_CONTAINER"
 
 log "Applying $(grep -cvE '^\s*(#|$)' "$GROUPS_FILE") LuckPerms commands via $MC_CONTAINER"
 grep -vE '^\s*(#|$)' "$GROUPS_FILE" | docker exec -i "$MC_CONTAINER" rcon-cli >/dev/null
+
+log "Waiting for LuckPerms to write every groups.lp node to MariaDB"
+wait_lp_settled 0
+stale="$(stale_nodes "$(current_nodes)")"
+if [[ -n "$stale" ]]; then
+  log "Unsetting $(grep -c . <<<"$stale") node(s) not in groups.lp"
+  while IFS=$'\t' read -r g node _ server world; do
+    ctx=""
+    [[ "$server" == global ]] || ctx+=" server=$server"
+    [[ "$world" == global ]] || ctx+=" world=$world"
+    printf 'lp group %s permission unset %s%s\n' "$g" "$node" "$ctx"
+  done <<<"$stale" | tee /dev/stderr | docker exec -i "$MC_CONTAINER" rcon-cli >/dev/null
+  rcon "$MC_CONTAINER" lp sync >/dev/null
+  wait_lp_settled 1
+else
+  echo "No stale nodes"
+fi
 
 if (( DO_WORLD )); then
   # Multiverse list output varies by version; accept several forms.
@@ -225,63 +339,67 @@ if (( DO_WORLD )); then
   done
 fi
 
-log "Waiting for LuckPerms to finish writing"
-sleep 5
 log "LuckPerms groups in MariaDB"
-# shellcheck disable=SC2016  # passwords come from container env
-docker exec "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" luckperms -t -e "
-  SELECT g.name AS \`group\`, COUNT(p.id) AS nodes
-    FROM luckperms_groups g LEFT JOIN luckperms_group_permissions p ON p.name = g.name
-   GROUP BY g.name ORDER BY g.name;
-  SELECT name AS \`group\`, permission, value, server, world
-    FROM luckperms_group_permissions
-   WHERE permission LIKE \"group.%\" OR permission LIKE \"weight.%\" OR permission = \"*\"
-      OR permission LIKE \"fawe.%\" OR permission LIKE \"voxelsniper.%\"
-      OR permission LIKE \"worldedit.%\"
-   ORDER BY name, permission, world;"'
+db -t <<'SQL'
+SELECT g.name AS `group`, COUNT(p.id) AS nodes
+  FROM luckperms_groups g LEFT JOIN luckperms_group_permissions p ON p.name = g.name
+ GROUP BY g.name ORDER BY g.name;
+SELECT name AS `group`, permission, value, server, world
+  FROM luckperms_group_permissions
+ WHERE permission LIKE 'group.%' OR permission LIKE 'weight.%' OR permission = '*'
+    OR permission LIKE 'fawe.%' OR permission LIKE 'voxelsniper.%'
+    OR permission LIKE 'worldedit.%'
+ ORDER BY name, permission, world;
+SQL
 
 log "Verifying: only the allowed false nodes; builder FAWE/Voxel only in world=creative; default has no edit tools"
-# shellcheck disable=SC2016
-false_nodes="$(docker exec "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -N luckperms -e "
-  SELECT name, permission, server, world FROM luckperms_group_permissions
-   WHERE value = 0 ORDER BY name, permission;"')"
+# Re-confirm everything is still present right before the checks (world steps
+# above can take minutes; this is quick when nothing changed).
+wait_lp_settled 1
+false_nodes="$(db -N -B <<'SQL'
+SELECT name, permission, server, world FROM luckperms_group_permissions
+ WHERE value = 0 ORDER BY name, permission;
+SQL
+)"
 check_false_nodes <<<"$false_nodes"
 
-# shellcheck disable=SC2016
-bad_fawe="$(docker exec "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -N luckperms -e "
-  SELECT COUNT(*) FROM luckperms_group_permissions
-   WHERE name = \"builder\" AND permission LIKE \"fawe.%\"
-     AND world <> \"creative\";"')"
+bad_fawe="$(db -N -B <<'SQL'
+SELECT COUNT(*) FROM luckperms_group_permissions
+ WHERE name = 'builder' AND permission LIKE 'fawe.%' AND world <> 'creative';
+SQL
+)"
 [[ "$bad_fawe" == "0" ]] || die "builder has $bad_fawe FAWE nodes outside world=creative"
 
-# shellcheck disable=SC2016
-bad_voxel="$(docker exec "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -N luckperms -e "
-  SELECT COUNT(*) FROM luckperms_group_permissions
-   WHERE name = \"builder\" AND permission LIKE \"voxelsniper.%\"
-     AND world <> \"creative\";"')"
+bad_voxel="$(db -N -B <<'SQL'
+SELECT COUNT(*) FROM luckperms_group_permissions
+ WHERE name = 'builder' AND permission LIKE 'voxelsniper.%' AND world <> 'creative';
+SQL
+)"
 [[ "$bad_voxel" == "0" ]] || die "builder has $bad_voxel voxelsniper nodes outside world=creative"
 
-# shellcheck disable=SC2016
-default_edit="$(docker exec "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -N luckperms -e "
-  SELECT COUNT(*) FROM luckperms_group_permissions
-   WHERE name = \"default\" AND (
-     permission LIKE \"fawe.%\" OR permission LIKE \"worldedit.%\"
-     OR permission LIKE \"voxelsniper.%\"
-   );"')"
+default_edit="$(db -N -B <<'SQL'
+SELECT COUNT(*) FROM luckperms_group_permissions
+ WHERE name = 'default' AND (
+   permission LIKE 'fawe.%' OR permission LIKE 'worldedit.%'
+   OR permission LIKE 'voxelsniper.%');
+SQL
+)"
 [[ "$default_edit" == "0" ]] || die "default has $default_edit FAWE/WorldEdit/VoxelSniper nodes (must be zero)"
 
-# shellcheck disable=SC2016
-builder_voxel_pct="$(docker exec "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -N luckperms -e "
-  SELECT COUNT(*) FROM luckperms_group_permissions
-   WHERE name = \"builder\" AND permission = \"voxelsniper.%\" AND world = \"creative\";"')"
+builder_voxel_pct="$(db -N -B <<'SQL'
+SELECT COUNT(*) FROM luckperms_group_permissions
+ WHERE name = 'builder' AND permission = 'voxelsniper.%' AND world = 'creative';
+SQL
+)"
 [[ "$builder_voxel_pct" == "1" ]] || die "builder missing voxelsniper.% in world=creative"
 
 # /survival and /creative (mv tp ll:<world>) must stay usable by everyone.
-# shellcheck disable=SC2016
-default_ll="$(docker exec "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -N luckperms -e "
-  SELECT COUNT(*) FROM luckperms_group_permissions
-   WHERE name = \"default\" AND value = 1 AND world = \"global\"
-     AND permission IN (\"multiverse.teleport.self.ll.survival\", \"multiverse.teleport.self.ll.creative\");"')"
+default_ll="$(db -N -B <<'SQL'
+SELECT COUNT(*) FROM luckperms_group_permissions
+ WHERE name = 'default' AND value = 1 AND world = 'global'
+   AND permission IN ('multiverse.teleport.self.ll.survival', 'multiverse.teleport.self.ll.creative');
+SQL
+)"
 [[ "$default_ll" == "2" ]] || die "default is missing multiverse.teleport.self.ll.{survival,creative} (/survival, /creative)"
 
 echo "OK: only admin gamemode-bypass false nodes; builder FAWE/Voxel creative-only; default has no edit tools; default can /survival /creative"

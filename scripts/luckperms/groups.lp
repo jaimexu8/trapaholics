@@ -1,7 +1,11 @@
 # LuckPerms group definitions for trapaholics (ARCHITECTURE.md §6).
 #
 # Applied by scripts/luckperms/setup.sh over RCON. This file is the source of
-# truth: each run CLEARS the three groups and rebuilds them from here.
+# truth: each run (re)sets every node below in place, then setup.sh unsets any
+# node the groups have in MariaDB that is NOT listed here. No `clear` (groups
+# would be empty on a live server until re-added). Only `creategroup`,
+# `setweight`, `setdisplayname`, `parent add` and `permission set` (contexts
+# world=/server=) are allowed; setup.sh diffs against exactly these.
 # (Users and their group memberships are NOT touched.)
 #
 # Contexts: world=survival | world=survival_nether | world=survival_the_end |
@@ -22,9 +26,6 @@
 # --- groups ------------------------------------------------------------------
 lp creategroup builder
 lp creategroup admin
-lp group default clear
-lp group builder clear
-lp group admin clear
 
 lp group default setweight 0
 lp group builder setweight 50
