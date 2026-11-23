@@ -10,8 +10,10 @@
 bedrock:
   address: 0.0.0.0
   port: 19132
-  # both = NetherNet + classic RakNet UDP. RakNet listens on `port` (19132) for
-  # the playit free-plan Bedrock/UDP tunnel; NetherNet needs a separate UDP port.
+  # Default Geyser is transport: nethernet (signaling TCP 19132). That does not
+  # match playit's free Bedrock RakNet / plain UDP tunnel. Use both so RakNet
+  # listens on `port` (19132) for playit "Bedrock RakNet"; NetherNet uses
+  # webrtc-port (19133) and needs a separate "Bedrock NetherNet" tunnel if wanted.
   transport: both
   webrtc-port: 19133
   signaling:
