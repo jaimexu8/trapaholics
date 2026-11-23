@@ -193,6 +193,13 @@ if (( DO_WORLD )); then
   printf '%s\n' "$mvinv_out"
   ! printf '%s' "$mvinv_out" | grep -qiE 'unknown command|plugin.*not' \
     || die "Multiverse-Inventories mvinv unavailable"
+  # /survival + /creative use `mv tp ll:<world>`: the optional share last_location
+  # must be active in the live config (synced from config/minecraft/plugins/).
+  mvinv_cfg="$MC_DATA_DIR/plugins/Multiverse-Inventories/config.yml"
+  awk '/^[^ #]/{p=($0 ~ /^share-handling:/)} p' "$mvinv_cfg" \
+    | grep -qE '^ +- +last_location$' \
+    || die "last_location is not in share-handling.active-optional-shares of $mvinv_cfg"
+  echo "Multiverse-Inventories: last_location share active (/survival, /creative)"
 
   log "WorldGuard spawn regions (survival + creative)"
   install_wg_spawn survival
@@ -269,7 +276,15 @@ builder_voxel_pct="$(docker exec "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIA
    WHERE name = \"builder\" AND permission = \"voxelsniper.%\" AND world = \"creative\";"')"
 [[ "$builder_voxel_pct" == "1" ]] || die "builder missing voxelsniper.% in world=creative"
 
-echo "OK: only admin gamemode-bypass false nodes; builder FAWE/Voxel creative-only; default has no edit tools"
+# /survival and /creative (mv tp ll:<world>) must stay usable by everyone.
+# shellcheck disable=SC2016
+default_ll="$(docker exec "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -N luckperms -e "
+  SELECT COUNT(*) FROM luckperms_group_permissions
+   WHERE name = \"default\" AND value = 1 AND world = \"global\"
+     AND permission IN (\"multiverse.teleport.self.ll.survival\", \"multiverse.teleport.self.ll.creative\");"')"
+[[ "$default_ll" == "2" ]] || die "default is missing multiverse.teleport.self.ll.{survival,creative} (/survival, /creative)"
+
+echo "OK: only admin gamemode-bypass false nodes; builder FAWE/Voxel creative-only; default has no edit tools; default can /survival /creative"
 log "Done. In game / console:  lp listgroups   lp group builder permission info"
 echo "Promote a player:  docker exec $MC_CONTAINER rcon-cli \"lp user <name> parent add builder\""
 echo "Note: admin mv.bypass.gamemode.* is set false, so admins are forced into each world's gamemode;"

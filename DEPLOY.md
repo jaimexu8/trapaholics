@@ -269,7 +269,9 @@ scripts/luckperms/setup.sh --no-world
   `config/worldguard/spawn-regions.yml`, runs `wg reload`, then has WorldGuard
   re-save the regions and checks that the spawn region and its flags came back.
 - Verifies: **no** LuckPerms `false` nodes; builder FAWE/VoxelSniper only in
-  `world=creative`; default has no FAWE/WorldEdit/VoxelSniper nodes.
+  `world=creative`; default has no FAWE/WorldEdit/VoxelSniper nodes; default has
+  `multiverse.teleport.self.ll.survival` / `.creative`; the live
+  Multiverse-Inventories config has the `last_location` share active.
 
 Check:
 
@@ -293,7 +295,51 @@ nothing. Use them in-game, or read `regions.yml`.)
 | `admin` | `*` | `*` | `*` (minus `mv.bypass.gamemode.*`, see below) |
 
 Multiverse 5 nodes for world switch (finer teleport on by default):
-`multiverse.access.<world>` and `multiverse.teleport.self.w.<world>`.
+`multiverse.access.<world>`, `multiverse.teleport.self.ll.<world>` (what
+`/survival` / `/creative` use) and `multiverse.teleport.self.w.<world>` (plain
+`/mv tp <world>`).
+
+### `/survival` and `/creative` return you to where you were
+
+`config/minecraft/commands.yml` aliases `/survival` → `mv tp ll:survival` and
+`/creative` → `mv tp ll:creative`. `ll:` is Multiverse-Inventories' **last
+location** destination (no extra plugin):
+
+- When a player teleports from one world to another, Multiverse-Inventories saves
+  the spot they left in that world's group profile (share `last_location`,
+  switched on by `share-handling.active-optional-shares: [last_location]` in
+  `config/minecraft/plugins/Multiverse-Inventories/config.yml`). It also saves on
+  quit and on server shutdown. Profiles live in
+  `minecraft/plugins/Multiverse-Inventories/groups/<group>/`, so this **survives
+  restarts**. Java and Bedrock (Floodgate UUID) players are handled the same.
+- `/survival` from creative goes back to the last spot **anywhere in the survival
+  group**: if you left from the nether, you return to the nether spot.
+  `/creative` from survival goes back to your last creative spot.
+- No saved spot (first visit, or before this change) → that world's **spawn**.
+- Running `/survival` while already in a survival world (or `/creative` in
+  creative) does not cross groups: you go to the world spawn (from the nether /
+  end: to the spot where you last left the overworld, else its spawn).
+- It is a normal cross-world teleport, so the inventory swap still happens.
+  `sharables.apply-last-location-for-all-teleports: false` keeps it to these two
+  commands: `/spawn`, `/home`, `/tpa`, portals still go where they point.
+- The location is used exactly as saved (no safety check), like a `/back`.
+
+**Applying it to a running server** (after merging):
+
+```bash
+cd ~/mc
+git pull
+# Re-syncs commands.yml + Multiverse-Inventories config.yml (templates are newer
+# than the live files after the pull); playit always restarts with minecraft.
+docker compose restart minecraft playit
+# After RCON is up: grants multiverse.teleport.self.ll.* to default and checks
+# the last_location share is active.
+scripts/luckperms/setup.sh --no-world
+grep -A3 'active-optional-shares' minecraft/plugins/Multiverse-Inventories/config.yml
+```
+
+Spots are only recorded from this point on, so everyone's first `/survival` /
+`/creative` after the update lands at spawn.
 
 **Admin gamemode vs inventories:** Multiverse-Core `enforce-gamemode` forces
 **everyone, admins included,** into each world's gamemode. Admin `*` would
@@ -456,7 +502,10 @@ Do this with two accounts or by switching worlds carefully:
    diamond with an anvil).
 2. Run `/survival`. Confirm the item is **gone** from inventory, armour, and
    ender chest. XP / effects should reset to the survival group's state.
-3. Run `/creative` again — the creative item returns.
+3. Run `/creative` again — the creative item returns, and you are back where
+   you stood in creative (not at spawn). Walk somewhere in survival, `/creative`,
+   `/survival`: you return to that survival spot. Restart and repeat: still
+   remembered.
 4. From creative, `/tpa` a friend in survival and accept — inventories must still
    not leak (Multiverse-Inventories swaps on world change).
 5. Die in creative and respawn — still no leak into survival.

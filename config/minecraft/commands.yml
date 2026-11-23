@@ -1,9 +1,16 @@
-# Bukkit command aliases: /survival and /creative teleport to each world's spawn
-# (Multiverse-Core). Applied via itzg config sync on start.
+# Bukkit command aliases: /survival and /creative return the player to where they
+# LAST WERE in that Multiverse-Inventories group (Multiverse-Inventories `ll:`
+# last-location destination, used through Multiverse-Core's `mv tp`). With no
+# saved location (first visit) `ll:` falls back to the world's spawn.
+#   /survival -> last spot anywhere in group `survival` (overworld, nether or end)
+#   /creative -> last spot in `creative`
+# Needs share-handling.active-optional-shares: [last_location] in
+# plugins/Multiverse-Inventories/config.yml and multiverse.teleport.self.ll.<world>
+# (scripts/luckperms/groups.lp). Applied via itzg config sync on start.
 command-block-overrides: []
 ignore-vanilla-permissions: false
 aliases:
   survival:
-    - "mv tp survival"
+    - "mv tp ll:survival"
   creative:
-    - "mv tp creative"
+    - "mv tp ll:creative"
