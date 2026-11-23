@@ -1,0 +1,9 @@
+# Bukkit command aliases: /survival and /creative teleport to each world's spawn
+# (Multiverse-Core). Applied via itzg config sync on start.
+command-block-overrides: []
+ignore-vanilla-permissions: false
+aliases:
+  survival:
+    - "mv tp survival"
+  creative:
+    - "mv tp creative"
