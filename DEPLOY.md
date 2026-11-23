@@ -27,9 +27,9 @@ natively. There is no Velocity.
   `172.28.10.10` and connects to Paper at `minecraft:25565` (with PROXY). A
   `minecraft` restart does **not** affect Geyser's networking.
 - Only `playit` uses `network_mode: service:minecraft`. Inside that namespace
-  the Java tunnel targets `127.0.0.1:25565`, and the Bedrock NetherNet tunnels
-  target geyser at **`172.28.10.10`** (TCP `19132` signaling, UDP `19133`
-  media). minecraft (`172.28.10.2`) is on the `mc` network, so that IP is
+  the Java tunnel targets `127.0.0.1:25565`, and the Bedrock (Geyser) tunnel
+  targets geyser at **`172.28.10.10:19133`** (UDP NetherNet game traffic;
+  signaling is playit's NXS service). minecraft (`172.28.10.2`) is on the `mc` network, so that IP is
   reachable from playit. Use the IP, not the name `geyser`.
 - **Ops rule: whenever `minecraft` restarts, restart `playit` too.** playit
   lives in minecraft's network namespace. When minecraft restarts (a manual
@@ -146,10 +146,12 @@ cd ~/mc
 cp -n config/geyser/config.yml geyser/config.yml
 ```
 
-`bedrock.signaling.advertise-addresses` holds the placeholder
-`replace-with-playit-nethernet-udp-address.invalid`. It never resolves, so
-Geyser will not start NetherNet signaling until you replace it with the playit
-UDP media address in step 9. That's expected for now.
+The template uses playit NXS signaling (`bedrock.signaling.mode: nxs`) with an
+**empty** token. Do not paste the token into the file: set `GEYSER_NXS_TOKEN`
+in `.env` (step 9). On every start the geyser container's entrypoint
+(`scripts/geyser/entrypoint.sh`) writes it into `bedrock.signaling.nxs.token`
+of `geyser/config.yml`; with the variable unset the file is left as it is.
+Until the token is set, Bedrock signaling won't register. That's expected for now.
 
 Do **not** start `playit` yet. The Floodgate key does not exist until Paper has
 started once (next steps).
@@ -203,8 +205,8 @@ docker compose up -d geyser
 docker compose logs geyser | grep -iE 'Done|error|exception'
 ```
 
-Geyser should log `Done`. NetherNet signaling stays off until step 9 replaces
-the advertise-address placeholder.
+Geyser should log `Done`. Bedrock signaling won't register until step 9 sets
+`GEYSER_NXS_TOKEN`.
 
 ### CoreProtect → MySQL (required check)
 
@@ -288,15 +290,21 @@ nothing. Use them in-game, or read `regions.yml`.)
 |---|---|---|---|
 | `default` | GriefPrevention claims; no FAWE | Build by hand only; no FAWE / VoxelSniper | Chat, `/tpa` `/tpahere` `/tpaccept`, `/home` `/sethome` (Essentials `sethome-multiple.default`), `/spawn`, `/survival`, `/creative` |
 | `builder` (inherits default) | same as default (**no FAWE**) | `fawe.limit.builder` + `fawe.permpack.basic` + `fawe.bypass.regions` + FastAsyncVoxelSniper (`voxelsniper.%`); `/speed` | |
-| `admin` | `*` | `*` | `*` |
+| `admin` | `*` | `*` | `*` (minus `mv.bypass.gamemode.*`, see below) |
 
 Multiverse 5 nodes for world switch (finer teleport on by default):
 `multiverse.access.<world>` and `multiverse.teleport.self.w.<world>`.
 
-**Admin gamemode vs inventories:** admin `*` includes Multiverse-Core
-`mv.bypass.gamemode.*`, so admins keep their gamemode when changing worlds.
-Multiverse-Inventories `share-handling.enable-bypass-permissions` is **false**,
-so admin `*` does **not** skip the survival ↔ creative inventory swap.
+**Admin gamemode vs inventories:** Multiverse-Core `enforce-gamemode` forces
+**everyone, admins included,** into each world's gamemode. Admin `*` would
+include Multiverse-Core's `mv.bypass.gamemode.<world>` (the node name in
+Multiverse-Core 5.8.2), so `groups.lp` sets explicit **false** nodes on `admin`
+for `mv.bypass.gamemode.survival`, `.survival_nether`, `.survival_the_end`,
+`.creative` and `.*` (an exact false node beats `*`). These are the only false
+nodes `setup.sh` accepts. Multiverse-Inventories
+`share-handling.enable-bypass-permissions` is **false**, so admin `*` does
+**not** skip the survival ↔ creative inventory swap (that setting also gates
+`mvinv.bypass.gamemode.*`).
 
 FAWE limits (tune in `config/patches/minecraft/fawe-limits.json`, then restart
 `minecraft`):
@@ -362,68 +370,45 @@ Compose sets `USES_PROXY_PROTOCOL=true` on `minecraft` so the itzg healthcheck
 sends a PROXY header (`mc-health --use-proxy`). Without that, Paper rejects the
 probe and the container stays unhealthy once `proxies.proxy-protocol` is on.
 
-### Bedrock NetherNet tunnels (required)
+### Bedrock tunnel (required)
 
 Bedrock clients from **26.60** on no longer connect over RakNet, so NetherNet is
 the only Bedrock route here (Geyser `bedrock.transport: nethernet`,
-`config-version: 12`). RakNet is not offered. NetherNet needs **two** paths, and
-playit must carry both:
+`config-version: 12`). RakNet is not offered. playit provides the NetherNet
+**signaling** (NXS, `https://nethernet.playit.gg`); the tunnel carries only the
+UDP game traffic. There is no TCP signaling tunnel and no `advertise-addresses`.
 
-| Path | Protocol | playit local address | Local port |
-|---|---|---|---|
-| Signaling (what the player types in) | **TCP** | `172.28.10.10` | `19132` |
-| Media (WebRTC) | **UDP** | `172.28.10.10` | `19133` |
+> **Experimental:** playit's Bedrock/Geyser tunnel type is experimental. Its
+> addresses (and the token) may change; if Bedrock stops working, re-check the
+> tunnel page and re-copy the hostname and token.
 
-1. https://playit.gg/account/tunnels/ → create the **Bedrock NetherNet** tunnel
-   type. If the dashboard creates it as one tunnel with both a TCP and a UDP
-   part, set both local endpoints as in the table. If it doesn't, create one
-   TCP tunnel (signaling) and one UDP tunnel (media). Leave Proxy Protocol
-   **off** on these for now (see "Bedrock real IPs" below).
-2. Write down the two **public** addresses playit assigns:
-   - the TCP signaling address `host:port`, which you give to Bedrock players
-   - the UDP media address `host:port`
-3. Put the **UDP media** address into `geyser/config.yml`, including its port
-   (without a port Geyser would advertise 19133, which is wrong behind playit):
-
-   ```yaml
-   bedrock:
-     signaling:
-       advertise-addresses:
-         - "<udp-host>:<udp-port>"
-   ```
-
-4. `docker compose restart geyser`, then check:
+1. https://playit.gg/account/tunnels/ → create **one** tunnel of type
+   **Minecraft Bedrock → Geyser or WaterdogPE**.
+2. Local address **`172.28.10.10`**, port **`19133`**, **Proxy Protocol: None**.
+3. On the tunnel page open **Configuration help → Geyser** tab and copy the
+   `nxs` **token** into `.env`:
 
    ```bash
-   grep -q 'replace-with-playit' geyser/config.yml && echo "STILL PLACEHOLDER"
-   docker compose logs geyser | grep 'Built-in signaling started on http://0.0.0.0:19132'
+   GEYSER_NXS_TOKEN=<token from playit>
    ```
 
-### Bedrock real IPs (optional, OFF by default)
+   Never put it in `config/geyser/config.yml` or commit it. The geyser
+   entrypoint writes it into `geyser/config.yml` on every start.
+4. `docker compose up -d geyser` (recreates it with the new env), then check:
 
-Geyser's `advanced.bedrock.haproxy-protocol-whitelisted-ips` is **empty** in the
-template. Listing any address turns HAProxy protocol on, and
-`webrtc-proxy-protocol-relays` then makes a PROXY header **mandatory** on the
-media port. With both lists empty, Bedrock players show up with the playit
-agent's address (`172.28.10.2`, minecraft's IP on `mc`). Bedrock still works
-fine that way.
-
-Turn real Bedrock IPs on **only after confirming** that playit sends PROXY v2
-on the NetherNet tunnel type, both the TCP and the UDP part:
-
-1. Enable Proxy Protocol v2 on the Bedrock NetherNet tunnel(s) in playit.
-2. In `geyser/config.yml`:
-
-   ```yaml
-   advanced:
-     bedrock:
-       haproxy-protocol-whitelisted-ips: [172.28.10.2]   # signaling (TCP)
-       webrtc-proxy-protocol-relays: [172.28.10.2]       # media (UDP)
+   ```bash
+   docker compose logs geyser | grep 'Registered with the external signaling service'
+   # → ... Players can join at https://<tunnel>.tun.ply.gg:19132
    ```
 
-3. `docker compose restart geyser`, and run the Bedrock join test from step 11.
-   If joins fail, empty both lists again, turn PROXY off on the tunnel and
-   restart geyser.
+5. Bedrock players add a server with the **tunnel hostname** (`<tunnel>.tun.ply.gg`
+   as shown in that log line / on the tunnel page) and port **`19132`**.
+
+Bedrock players show up with the playit agent's address (`172.28.10.2`) rather
+than their real IP: the tunnel runs with Proxy Protocol None, so leave Geyser's
+`advanced.bedrock.haproxy-protocol-whitelisted-ips` and
+`webrtc-proxy-protocol-relays` **empty** (listing anything makes a PROXY header
+mandatory and breaks joins).
 
 ### Start the agent
 
@@ -484,22 +469,23 @@ Do this with two accounts or by switching worlds carefully:
 
 10. **Bedrock, current client.** On a phone or console with the newest Bedrock
     release (26.60 or later), from **outside** your home network (mobile data),
-    add a server with the playit **TCP signaling** address and port from step 9
-    and join. Check:
+    add a server with the playit Bedrock **tunnel hostname** and port `19132`
+    from step 9 and join. Check:
     - Geyser logs the player: `docker compose logs geyser | tail -20`
       (a `... has connected to the Java server` line).
     - The player appears in `docker exec minecraft rcon-cli list` with
       Floodgate's `.` prefix and lands in `survival`.
     - Walk, place a block, chat, `/creative`, `/survival`.
-    If the client hangs on "Locating server", the UDP media path or
-    `advertise-addresses` is wrong (step 9).
+    If the client hangs on "Locating server", check the geyser log for
+    `Registered with the external signaling service`, the `GEYSER_NXS_TOKEN`
+    in `.env`, and that the tunnel targets `172.28.10.10:19133` (step 9).
 11. **Real-IP check.** Join over Java from outside your network and look up your
     public IP (e.g. `curl -s https://ifconfig.me` on that device). Then run
     `grep 'logged in with entity id' minecraft/logs/latest.log | tail -3`. The
     line must show **your public IP**, not `127.0.0.1` or `172.28.10.x`. If it
     shows a local address, Proxy Protocol v2 is off on the Java tunnel. For
-    Bedrock, the IP is the agent's `172.28.10.2` unless you turned on "Bedrock
-    real IPs" in step 9. If you did, Bedrock must show your public IP too.
+    Bedrock, the IP is the agent's `172.28.10.2` (the Bedrock tunnel runs with
+    Proxy Protocol None, step 9).
 
 ## 12. Backups
 
@@ -550,8 +536,12 @@ docker compose up -d                        # apply compose/template changes
 - **Config templates:** files under `config/minecraft/` are copied into the data
   dir on start when newer than the live file; `${CFG_*}` placeholders are filled.
   `config/patches/minecraft/` is re-applied on **every** start.
-- **Geyser config** is not managed by itzg — edit `geyser/config.yml` (seeded from
-  `config/geyser/config.yml`) and `docker compose restart geyser`. Geyser (and Paper)
+- **Geyser config** is not managed by itzg — edit `geyser/config.yml` (seeded once
+  from `config/geyser/config.yml` with `cp -n`) and `docker compose restart geyser`.
+  The one exception is the playit NXS token: keep it in `.env` as
+  `GEYSER_NXS_TOKEN`; `scripts/geyser/entrypoint.sh` writes it into
+  `bedrock.signaling.nxs.token` on every start (and leaves the file alone when
+  unset). After changing it, `docker compose up -d geyser`. Geyser (and Paper)
   run as `HOST_UID:HOST_GID` from `.env`; keep `./geyser` and `./minecraft` owned
   by that user.
 - **Never tunnel RCON (25575).** It stays inside Docker (`docker exec minecraft rcon-cli`).

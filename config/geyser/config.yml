@@ -1,33 +1,31 @@
 # Geyser Standalone — Bedrock → Paper (ARCHITECTURE.md §5.7).
-# Seed into ./geyser/config.yml on first deploy (see DEPLOY.md).
+# Seed into ./geyser/config.yml on first deploy (see DEPLOY.md step 6).
 # Keys verified against Geyser 2.12.1-b1307 (config-version 12).
 #
 # NetherNet is the ONLY Bedrock transport (Bedrock 26.60+ no longer connects over
-# RakNet). The playit agent shares minecraft's network namespace and reaches this
-# container at its fixed compose IP 172.28.10.10 (TCP 19132 signaling, UDP 19133
-# media).
+# RakNet). Signaling is provided by playit (NXS): Geyser registers with
+# nethernet.playit.gg and playit's "Minecraft Bedrock → Geyser or WaterdogPE"
+# tunnel (agent 1.2.0) carries only the UDP NetherNet game traffic to this
+# container's fixed compose IP 172.28.10.10:19133 (DEPLOY.md step 9).
 # Geyser connects to Paper at hostname `minecraft:25565` with PROXY protocol.
+#
+# The NXS token is a secret and is NOT stored here: put it in .env as
+# GEYSER_NXS_TOKEN; scripts/geyser/entrypoint.sh writes it into
+# bedrock.signaling.nxs.token of ./geyser/config.yml on every container start.
 
 bedrock:
   address: 0.0.0.0
-  # Built-in signaling listens here on TCP (and on UDP only if webrtc-port is 0).
+  # Port players connect to on the playit tunnel hostname (advertised by NXS).
   port: 19132
-  # NetherNet media (WebRTC) UDP port — must differ from `port`.
+  # NetherNet game traffic (UDP); the playit tunnel targets 172.28.10.10:19133.
   webrtc-port: 19133
   # nethernet only; RakNet (old clients) is deliberately not offered.
   transport: nethernet
   signaling:
-    mode: builtin
-    # REQUIRED: the PUBLIC address of the playit NetherNet *UDP media* tunnel,
-    # as host:port exactly as the playit dashboard shows it (without a port Geyser
-    # appends webrtc-port 19133, which is wrong behind playit). Players get this
-    # address from signaling and send WebRTC media to it.
-    # The placeholder uses the reserved .invalid TLD on purpose: it never
-    # resolves, so Geyser refuses to start signaling until you replace it
-    # (DEPLOY.md step 9). Example:  - "something.at.ply.gg:41234"
-    advertise-addresses:
-      - "replace-with-playit-nethernet-udp-address.invalid"
-    # Prefer the explicit playit address over STUN (STUN sees CGNAT, not playit).
+    # playit provides signaling; no built-in TCP signaling listener.
+    mode: nxs
+    # No advertise-addresses / STUN: the NXS service handles addressing.
+    advertise-addresses: []
     stun-discovery: false
     builtin:
       https:
@@ -35,8 +33,10 @@ bedrock:
         private-key: ''
         password: ''
     nxs:
+      # Filled from GEYSER_NXS_TOKEN (.env) by scripts/geyser/entrypoint.sh.
+      # Leave empty here; never commit the real token.
       token: ''
-      endpoint: https://agent.warden.cloud
+      endpoint: https://nethernet.playit.gg
 
 java:
   # Compose DNS name on the `mc` network (geyser is NOT in minecraft's netns).
@@ -89,12 +89,9 @@ advanced:
   bedrock:
     broadcast-port: 0
     compression-level: 6
-    # OFF (empty) by default. Listing any address turns HAProxy protocol on.
-    # Bedrock players then show the playit agent's address (172.28.10.2) instead
-    # of their real IP. Only fill this in (with 172.28.10.2) and
-    # webrtc-proxy-protocol-relays below after confirming playit really sends
-    # PROXY v2 on the Bedrock NetherNet tunnels: with relays set, media is ONLY
-    # accepted with a PROXY header (DEPLOY.md step 9, "Bedrock real IPs").
+    # OFF (empty). The playit Bedrock (Geyser) tunnel runs with Proxy Protocol
+    # None, so leave these lists empty: listing any address turns HAProxy
+    # protocol on, and with relays set media is ONLY accepted with a PROXY header.
     haproxy-protocol-whitelisted-ips: []
     signaling-trusted-proxies: []
     webrtc-proxy-protocol-relays: []

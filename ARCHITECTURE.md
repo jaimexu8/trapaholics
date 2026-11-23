@@ -248,8 +248,10 @@ Velocity proxy.
 - Runs with `network_mode: "service:minecraft"`, so the tunnel's local target is
   `127.0.0.1:25565`, i.e. the Paper server. In the playit dashboard:
   - the **Minecraft Java** tunnel points at `127.0.0.1:25565`;
-  - a **Bedrock (UDP)** tunnel points at Geyser on UDP 19132 (§5.7). Confirm the
-    free plan allows a UDP tunnel.
+  - one **Minecraft Bedrock → Geyser or WaterdogPE** tunnel (experimental; agent
+    1.2.0) points at Geyser's fixed IP `172.28.10.10:19133` with Proxy Protocol
+    None. It carries only the UDP NetherNet game traffic; playit provides the
+    signaling (NXS) and players join the tunnel hostname on port 19132 (§5.7).
 - The `SECRET_KEY` lives in `.env` as `PLAYIT_SECRET_KEY`, **not** in
   `docker-compose.yml`. Compose reads it as `${PLAYIT_SECRET_KEY:?}`. The owner
   chose to keep the existing key; it was moved out of the compose file before the
@@ -334,7 +336,7 @@ Velocity proxy.
   - group `survival` = `survival`, `survival_nether`, `survival_the_end`;
   - group `creative` = `creative`;
   - each group has its own inventory, armour, ender chest, XP, health, hunger and
-    potion effects. Gamemode is forced per world.
+    potion effects. Gamemode is forced per world for everyone, admins included.
   - **Test before launch:** an item taken in creative must never appear in survival
     after `/tpa`, `/survival`, death or relog, and ender chests must stay separate.
 - New players spawn in `survival`. Pre-generate the survival world with Chunky
@@ -359,14 +361,20 @@ Velocity proxy.
   plugin. At research time Geyser's Paper plugin only declared support up to
   26.1.2, while the standalone/proxy build tracks the newest Java version (26.3).
   Verify again when implementing.
-- Geyser listens on **UDP 19132** and connects to `minecraft:25565` as a Java
-  client. **Floodgate** on Paper lets Bedrock players join without a Java account
+- Bedrock uses **NetherNet** only (`transport: nethernet`). Signaling is playit's
+  **NXS** service (`signaling.mode: nxs`, endpoint `https://nethernet.playit.gg`,
+  no `advertise-addresses`, STUN off); Geyser receives the UDP game traffic on
+  **19133** from the playit tunnel, and players connect to the tunnel hostname on
+  port **19132**. The NXS token is a secret: it lives in `.env` as
+  `GEYSER_NXS_TOKEN` and the container entrypoint writes it into the live
+  `geyser/config.yml`; the tracked template keeps it empty. Geyser connects to
+  `minecraft:25565` as a Java client. **Floodgate** on Paper lets Bedrock players join without a Java account
   and shows their skins to Java players. The Floodgate `key.pem` is shared between
   Geyser and Floodgate; it's a secret and must never be committed.
 - Because Paper requires PROXY protocol (§5.2), Geyser must send it to Paper
-  (Geyser's `use-proxy-protocol` option for the remote server). Bedrock players'
-  real IPs come from playit's (or frp's) PROXY protocol on UDP, if supported;
-  otherwise they show the tunnel's address.
+  (Geyser's `use-haproxy-protocol` option for the remote server). The playit
+  Bedrock tunnel runs with Proxy Protocol None, so Bedrock players show the
+  playit agent's address (`172.28.10.2`), not their real IP.
 - Bedrock players appear with Floodgate's default `.` name prefix, so their names
   can't clash with Java names. They get the same LuckPerms groups.
 - Geyser is labelled **beta** on Modrinth; pin a build and test it.
@@ -396,7 +404,10 @@ Three groups to start. More may be added later as more plugins are added.
 - **FAWE and VoxelSniper nodes for `builder` are granted only with
   `world=creative`.** Survival players, builders included, never have them.
   Verify in game that `//set` is refused in survival for a builder.
-- No explicit `false` nodes: an exact `false` beats admin's `*`.
+- No explicit `false` nodes (an exact `false` beats admin's `*`), with one
+  deliberate exception: `admin` has `mv.bypass.gamemode.<world>` and
+  `mv.bypass.gamemode.*` set **false**, so Multiverse-Core forces admins into
+  each world's gamemode like everyone else.
 - The `builder` group's name is a placeholder; renaming it later
   (`/lp group builder rename <new>`) is cheap.
 - Bedrock players (via Floodgate) get the same groups as Java players.

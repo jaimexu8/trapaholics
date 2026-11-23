@@ -30,6 +30,7 @@ services:
     volumes: !override
       - ./.smoke-data/geyser:/data
       - ./plugins-built/geyser/Geyser-Standalone.jar:/opt/Geyser-Standalone.jar:ro
+      - ./scripts/geyser/entrypoint.sh:/opt/geyser-entrypoint.sh:ro
 
   mariadb:
     container_name: !reset null

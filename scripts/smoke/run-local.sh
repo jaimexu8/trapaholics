@@ -11,8 +11,9 @@
 #     never started
 #
 # Checks: compose config; all plugins enabled; luckperms + coreprotect DBs exist
-# and CoreProtect uses MySQL; Geyser NetherNet signaling listens on TCP 19132 and
-# media on UDP 19133; Geyser reaches Paper over PROXY with no rejections;
+# and CoreProtect uses MySQL; Geyser NetherNet signaling (built-in here; playit
+# NXS in production) listens on TCP 19132 and media on UDP 19133; Geyser reaches
+# Paper over PROXY with no rejections;
 # scripts/luckperms/setup.sh passes its own checks. Then tears down and deletes
 # .smoke-data/.
 #
@@ -84,12 +85,16 @@ MARIADB_ROOT_PASSWORD=smokeroot0000
 PLAYIT_SECRET_KEY=not-a-real-key
 EOF
 
-# Geyser config from the template; the advertise placeholder never resolves, so
-# point it at loopback (host:port form, as the owner will) to get signaling up.
-sed 's/replace-with-playit-nethernet-udp-address\.invalid/127.0.0.1:19133/' \
+# Geyser config from the template. Production uses playit NXS signaling (needs
+# a real playit token), so locally switch to built-in signaling advertised on
+# loopback (host:port form) to get signaling up without playit.
+sed -e 's/^    mode: nxs$/    mode: builtin/' \
+    -e 's/^    advertise-addresses: \[\]$/    advertise-addresses: ["127.0.0.1:19133"]/' \
   config/geyser/config.yml >"$SMOKE_DATA/geyser/config.yml"
-grep -q '"127.0.0.1:19133"' "$SMOKE_DATA/geyser/config.yml" \
-  || die "advertise-addresses placeholder not found in config/geyser/config.yml"
+if ! grep -q '^    mode: builtin$' "$SMOKE_DATA/geyser/config.yml" \
+   || ! grep -q '"127.0.0.1:19133"' "$SMOKE_DATA/geyser/config.yml"; then
+  die "signaling mode / advertise-addresses not found in config/geyser/config.yml"
+fi
 
 log "compose config -q"
 "${COMPOSE[@]}" config -q
