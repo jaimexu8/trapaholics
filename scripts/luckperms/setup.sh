@@ -89,6 +89,45 @@ install_wg_spawn() {
   echo "Wrote WorldGuard spawn region for $world -> $regions"
 }
 
+# The ONLY explicit false nodes allowed: admin's Multiverse-Core gamemode bypass
+# (global context), so admin `*` does not keep admins in their gamemode across
+# worlds. Everything else must be granted positively (false nodes beat `*`).
+ALLOWED_FALSE_NODES=(
+  mv.bypass.gamemode.survival
+  mv.bypass.gamemode.survival_nether
+  mv.bypass.gamemode.survival_the_end
+  mv.bypass.gamemode.creative
+  'mv.bypass.gamemode.*'
+)
+
+# Reads false nodes as TSV `group<TAB>permission<TAB>server<TAB>world` on stdin.
+# Fails on any node that is not an allowed admin node in the global context, and
+# if an allowed admin node is missing.
+check_false_nodes() {
+  local group perm server world p ok bad=0 seen=" "
+  while IFS=$'\t' read -r group perm server world; do
+    [[ -n "$group" ]] || continue
+    ok=0
+    if [[ "$group" == admin && "$server" == global && "$world" == global ]]; then
+      for p in "${ALLOWED_FALSE_NODES[@]}"; do
+        [[ "$perm" == "$p" ]] && ok=1
+      done
+    fi
+    if (( ok )); then
+      seen+="$perm "
+    else
+      printf 'unexpected false node: group=%s permission=%s server=%s world=%s\n' \
+        "$group" "$perm" "$server" "$world" >&2
+      bad=1
+    fi
+  done
+  for p in "${ALLOWED_FALSE_NODES[@]}"; do
+    [[ "$seen" == *" $p "* ]] || { printf 'missing admin false node: %s\n' "$p" >&2; bad=1; }
+  done
+  (( bad == 0 )) || die "explicit false nodes are wrong (only admin mv.bypass.gamemode.* allowed)"
+  echo "false nodes: only admin mv.bypass.gamemode.* (${#ALLOWED_FALSE_NODES[@]} nodes)"
+}
+
 [[ -f "$GROUPS_FILE" ]] || die "missing $GROUPS_FILE"
 
 log "Waiting for $MC_CONTAINER RCON"
@@ -194,11 +233,12 @@ docker exec "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" luc
       OR permission LIKE \"worldedit.%\"
    ORDER BY name, permission, world;"'
 
-log "Verifying: no explicit false nodes; builder FAWE/Voxel only in world=creative; default has no edit tools"
+log "Verifying: only the allowed false nodes; builder FAWE/Voxel only in world=creative; default has no edit tools"
 # shellcheck disable=SC2016
-false_count="$(docker exec "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -N luckperms -e "
-  SELECT COUNT(*) FROM luckperms_group_permissions WHERE value = 0;"')"
-[[ "$false_count" == "0" ]] || die "found $false_count explicit false nodes (must be zero)"
+false_nodes="$(docker exec "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -N luckperms -e "
+  SELECT name, permission, server, world FROM luckperms_group_permissions
+   WHERE value = 0 ORDER BY name, permission;"')"
+check_false_nodes <<<"$false_nodes"
 
 # shellcheck disable=SC2016
 bad_fawe="$(docker exec "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -N luckperms -e "
@@ -229,8 +269,8 @@ builder_voxel_pct="$(docker exec "$DB_CONTAINER" sh -c 'mariadb -uroot -p"$MARIA
    WHERE name = \"builder\" AND permission = \"voxelsniper.%\" AND world = \"creative\";"')"
 [[ "$builder_voxel_pct" == "1" ]] || die "builder missing voxelsniper.% in world=creative"
 
-echo "OK: no false nodes; builder FAWE/Voxel creative-only; default has no edit tools"
+echo "OK: only admin gamemode-bypass false nodes; builder FAWE/Voxel creative-only; default has no edit tools"
 log "Done. In game / console:  lp listgroups   lp group builder permission info"
 echo "Promote a player:  docker exec $MC_CONTAINER rcon-cli \"lp user <name> parent add builder\""
-echo "Note: admin \`*\` includes mv.bypass.gamemode.* (keeps gamemode) but Multiverse-Inventories"
-echo "bypass is OFF so inventories still swap between survival and creative."
+echo "Note: admin mv.bypass.gamemode.* is set false, so admins are forced into each world's gamemode;"
+echo "Multiverse-Inventories bypass is OFF so inventories still swap between survival and creative."

@@ -6,12 +6,16 @@
 #
 # Contexts: world=survival | world=survival_nether | world=survival_the_end |
 #           world=creative. Nodes without a world context apply everywhere.
-# NO explicit false nodes (they beat admin's *).
+# NO explicit false nodes (they beat admin's *), with ONE exception: admin's
+# mv.bypass.gamemode.* nodes below (setup.sh allows exactly those).
 #
 # Multiverse 5 teleport (finer perms on by default for new installs):
 #   multiverse.teleport.self.w.<world>
 # Access: multiverse.access.<world>
-# Admin gamemode: mv.bypass.gamemode.* is covered by admin `*` (Core bypass).
+# Gamemode: Multiverse-Core enforce-gamemode forces EVERYONE, admins included,
+# into each world's gamemode. Admin `*` would include mv.bypass.gamemode.<world>
+# (Multiverse-Core 5.8.2 node name), so admin gets explicit false nodes for it
+# (an exact false node beats `*` in LuckPerms).
 # Inventory bypass stays OFF (Multiverse-Inventories enable-bypass-permissions:
 # false) so admin `*` does NOT skip the survival/creative inventory swap.
 
@@ -100,8 +104,15 @@ lp group builder permission set voxelsniper.% true world=creative
 lp group builder permission set essentials.speed true world=creative
 
 # =============================================================================
-# admin — everything, everywhere.
+# admin — everything, everywhere (except keeping their gamemode across worlds).
 # =============================================================================
 lp group admin permission set * true
+# Admins are forced into each world's gamemode like everyone else (see header).
+# These are the ONLY explicit false nodes allowed (checked by setup.sh).
+lp group admin permission set mv.bypass.gamemode.survival false
+lp group admin permission set mv.bypass.gamemode.survival_nether false
+lp group admin permission set mv.bypass.gamemode.survival_the_end false
+lp group admin permission set mv.bypass.gamemode.creative false
+lp group admin permission set mv.bypass.gamemode.* false
 
 lp sync

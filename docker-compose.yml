@@ -1,7 +1,8 @@
 # trapaholics.net — Phase 1 one-server stack (ARCHITECTURE.md §3, §5, §8, §9).
 #
 #   playit ──(shares minecraft's netns)──► 127.0.0.1:25565 (Paper)
-#        └─ Bedrock NetherNet ──────────► 172.28.10.10:{19132,19133} (geyser on mc net)
+#        └─ Bedrock NetherNet (UDP) ────► 172.28.10.10:19133 (geyser on mc net;
+#                                          signaling via playit NXS)
 #   geyser ──► minecraft:25565 (PROXY protocol)
 #   minecraft ──► mariadb:3306 (LuckPerms + CoreProtect; `db` internal-only)
 #
@@ -111,14 +112,15 @@ services:
     environment:
       TZ: Etc/UTC
       JAVA_TOOL_OPTIONS: "-Xms256M -Xmx512M"
-    command:
-      - java
-      - -jar
-      - /opt/Geyser-Standalone.jar
-      - --nogui
+      # playit NXS signaling token. When set, scripts/geyser/entrypoint.sh writes
+      # it into bedrock.signaling.nxs.token of ./geyser/config.yml on every start;
+      # when unset, config.yml is left untouched. Never commit it.
+      GEYSER_NXS_TOKEN: ${GEYSER_NXS_TOKEN:-}
+    command: ["sh", "/opt/geyser-entrypoint.sh"]
     volumes:
       - ./geyser:/data
       - ./plugins-built/geyser/Geyser-Standalone.jar:/opt/Geyser-Standalone.jar:ro
+      - ./scripts/geyser/entrypoint.sh:/opt/geyser-entrypoint.sh:ro
 
   mariadb:
     image: mariadb:12.3.3
@@ -151,7 +153,8 @@ services:
     container_name: playit
     restart: unless-stopped
     # Shares minecraft's network namespace: Java tunnel → 127.0.0.1:25565.
-    # Bedrock NetherNet tunnels target geyser's fixed IP 172.28.10.10 (see DEPLOY.md).
+    # The Bedrock (Geyser) tunnel targets geyser's fixed IP 172.28.10.10:19133
+    # (see DEPLOY.md step 9).
     # restart: true re-attaches playit when minecraft is recreated.
     network_mode: "service:minecraft"
     depends_on:

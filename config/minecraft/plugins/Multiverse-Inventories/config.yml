@@ -2,8 +2,10 @@
 # admins with `*`. When enable-bypass-permissions is true, `mvinv.bypass.*` (covered
 # by admin `*`) skips the inventory swap. Leave it false.
 #
-# Admins still keep their gamemode via Multiverse-Core's `mv.bypass.gamemode.*`
-# (also covered by `*`) — that is separate from inventory bypass. See DEPLOY.md.
+# The `mvinv.bypass.gamemode.*` node is gated by the same setting, so admin `*`
+# doesn't trigger it either. Gamemode itself is forced by Multiverse-Core for
+# everyone: admin gets explicit `mv.bypass.gamemode.*` false nodes
+# (scripts/luckperms/groups.lp). See DEPLOY.md.
 share-handling:
   enable-bypass-permissions: false
   enable-gamemode-share-handling: false
