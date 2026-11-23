@@ -40,6 +40,9 @@ services:
       USE_AIKAR_FLAGS: "true"
       ONLINE_MODE: "TRUE"
       ENABLE_WHITELIST: "FALSE"         # writes white-list=false (26.3 defaults it to true)
+      # Paper proxies.proxy-protocol is on; without this, mc-health's status ping
+      # is rejected and the container stays unhealthy.
+      USES_PROXY_PROTOCOL: "true"
       ENABLE_RCON: "true"
       RCON_PASSWORD: ${RCON_PASSWORD:?set in .env}
       MOTD: "trapaholics"

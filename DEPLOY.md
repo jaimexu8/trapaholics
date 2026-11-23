@@ -250,21 +250,32 @@ targets are loopback inside that namespace.
 2. Local address: `127.0.0.1`, port `25565`.
 3. **Proxy Protocol → Version 2**, then save. Do this **before** `docker compose up -d playit`.
 
-### Bedrock UDP tunnel (free plan)
+Compose sets `USES_PROXY_PROTOCOL=true` on `minecraft` so the itzg healthcheck
+sends a PROXY header (`mc-health --use-proxy`). Without that, Paper rejects the
+probe and the container stays unhealthy once `proxies.proxy-protocol` is on.
 
-playit's free plan includes **4 ports** and supports a **Minecraft Bedrock**
-(UDP / classic) tunnel as well as the newer NetherNet type. This stack uses
-Geyser `transport: both` so classic **UDP 19132** (RakNet) works. NetherNet
-uses a separate UDP port `19133` inside the container and is not required for
-the free-plan UDP tunnel.
+### Bedrock tunnel (free plan)
 
-1. Create a tunnel of type **Minecraft Bedrock** (UDP), not only NetherNet.
+playit's free plan (4 ports) lists these tunnel types as **non-premium**:
+**Bedrock RakNet**, **Bedrock NetherNet**, and plain **UDP**. Generic TCP is
+premium and is not used here.
+
+This stack's Geyser config uses `bedrock.transport: both` with:
+- **RakNet on UDP 19132** — matches playit **Bedrock RakNet** (preferred)
+- **NetherNet on UDP 19133** — optional; only if you also create a
+  **Bedrock NetherNet** tunnel
+
+Geyser's default is `nethernet` alone (signaling on TCP 19132). That would
+**not** match a Bedrock RakNet / plain UDP tunnel, so do not switch back to
+`nethernet` without changing the playit tunnel type to match.
+
+1. Create a tunnel of type **Bedrock RakNet** (or plain **UDP**).
 2. Local address: `127.0.0.1`, port `19132` (Geyser RakNet in the same netns as playit).
 3. Optionally set **Proxy Protocol → Version 2** so Bedrock real IPs are
    forwarded; Geyser already whitelists `127.0.0.0/8` for HAProxy headers from
    the local agent (`config/geyser/config.yml`).
-4. (Optional) A second UDP tunnel to `127.0.0.1:19133` is only needed if you
-   want NetherNet as well.
+4. (Optional) A **Bedrock NetherNet** tunnel to `127.0.0.1:19133` if you want
+   NetherNet as well.
 
 Then start the agent:
 
