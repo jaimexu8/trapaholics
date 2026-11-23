@@ -253,7 +253,13 @@ scripts/luckperms/setup.sh --no-world
 
 `setup.sh` does:
 
-- Applies `scripts/luckperms/groups.lp` (`default`, `builder`, `admin`) over RCON.
+- Applies `scripts/luckperms/groups.lp` (`default`, `builder`, `admin`) over RCON
+  **without clearing** the groups: every node is set in place, then only nodes the
+  groups have in MariaDB but `groups.lp` doesn't list are unset. Players keep their
+  permissions throughout, so it is safe to re-run on a live server. It then polls
+  MariaDB (LuckPerms writes asynchronously) until every `groups.lp` node is present
+  and stable over 3 reads, failing after ~120 s with the missing nodes listed.
+  Offline test of that logic: `scripts/luckperms/test/test-setup-wait.sh`.
 - Creates Multiverse world `creative` (normal terrain), forces creative + peaceful,
   `portal-form none`, unlinks nether/end portals via Multiverse-NetherPortals, and
   **reads back** gamemode / difficulty / portal-form from Multiverse's `worlds.yml`.
@@ -268,7 +274,7 @@ scripts/luckperms/setup.sh --no-world
 - Seeds the WorldGuard **spawn** region for both `survival` and `creative` from
   `config/worldguard/spawn-regions.yml`, runs `wg reload`, then has WorldGuard
   re-save the regions and checks that the spawn region and its flags came back.
-- Verifies: **no** LuckPerms `false` nodes; builder FAWE/VoxelSniper only in
+- Verifies: the only LuckPerms `false` nodes are admin's `mv.bypass.gamemode.*` set; builder FAWE/VoxelSniper only in
   `world=creative`; default has no FAWE/WorldEdit/VoxelSniper nodes; default has
   `multiverse.teleport.self.ll.survival` / `.creative`; the live
   Multiverse-Inventories config has the `last_location` share active.

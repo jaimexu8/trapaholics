@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Fake `docker` for test-setup-wait.sh. Serves `docker exec ... mariadb` from a
+# sqlite file and applies `lp group ... permission unset` sent over rcon-cli.
+#   STUB_DIR/live.db     what "MariaDB" returns now
+#   STUB_DIR/final.db    copied over live.db after STUB_PARTIAL_CALLS db reads
+set -euo pipefail
+[[ "$1" == exec ]] || { echo "stub docker: unsupported $*" >&2; exit 1; }
+shift
+[[ "$1" == -i ]] && shift
+shift # container
+if [[ "$1" == rcon-cli ]]; then
+  shift
+  if (( $# )); then cmds="$*"; else cmds="$(cat)"; fi
+  printf '%s\n' "$cmds" >>"$STUB_DIR/rcon.log"
+  while read -r lp grp g perm verb node ctx; do
+    [[ "$lp $grp $perm $verb" == "lp group permission unset" ]] || continue
+    w=global; [[ "${ctx:-}" == world=* ]] && w="${ctx#world=}"
+    sqlite3 "$STUB_DIR/live.db" "DELETE FROM luckperms_group_permissions
+      WHERE name='$g' AND permission='$node' AND server='global' AND world='$w';"
+  done <<<"$cmds"
+  echo "ok"
+  exit 0
+fi
+# mariadb: SQL on stdin
+n=$(( $(cat "$STUB_DIR/calls" 2>/dev/null || echo 0) + 1 ))
+echo "$n" >"$STUB_DIR/calls"
+if (( n == ${STUB_PARTIAL_CALLS:-0} + 1 )) && [[ -f "$STUB_DIR/final.db" ]]; then
+  cp "$STUB_DIR/final.db" "$STUB_DIR/live.db"
+fi
+sqlite3 -separator $'\t' "$STUB_DIR/live.db"
