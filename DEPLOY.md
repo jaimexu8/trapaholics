@@ -1,21 +1,25 @@
-# Deploying the Phase 1 network
+# Deploying the Phase 1 one-server stack
 
 Step-by-step go-live on the Debian host (`ssh moth`, user `jt`, repo at
 `/home/jt/mc`). Design background: [ARCHITECTURE.md](ARCHITECTURE.md). Backups
 are a separate system (PR #1): scripts in `scripts/backup/`, systemd units in
-`systemd/`, full guide in [docs/BACKUPS.md](docs/BACKUPS.md). Step 11 below sets them up.
+`systemd/`, full guide in [docs/BACKUPS.md](docs/BACKUPS.md). Step 12 below sets
+them up.
 
 What runs (all from `docker-compose.yml`, every version pinned):
 
 | Container | What | Data dir |
 |---|---|---|
-| `velocity` | Velocity 4.3.1 proxy (build 45), LuckPerms-Velocity | `./velocity` (mounted at `/server`) |
-| `survival` | Paper 26.3 build 258, 6 GB heap | `./survival` |
-| `creative` | Paper **26.2** build 135 + ViaVersion, 4 GB heap | `./creative` |
-| `mariadb` | MariaDB 12.3.3 (LTS), database `luckperms` | `./mariadb` |
-| `playit` | playit agent 1.2.0, shares velocity's network | — |
+| `minecraft` | Paper 26.3 build 258, 10 GB heap, all worlds | `./minecraft` |
+| `geyser` | Geyser Standalone 2.12.1-b1307 (same netns as `minecraft`) | `./geyser` |
+| `mariadb` | MariaDB 12.3.3 (LTS), databases `luckperms` + `coreprotect` | `./mariadb` |
+| `playit` | playit agent 1.2.0, shares minecraft's network | — |
 
 No host ports are published. The only way in is the playit tunnel.
+
+Worlds on the single Paper server: `survival` (+ `survival_nether`,
+`survival_the_end`) and `creative`. Chat, tab list and `/tpa` are shared
+natively. There is no Velocity.
 
 ---
 
@@ -24,14 +28,14 @@ No host ports are published. The only way in is the playit tunnel.
 - Docker Engine + the Compose plugin (`docker compose version`), and `jt` in the
   `docker` group.
 - ~3 GB free for images, the plugin build cache (`.build/`) and fresh worlds.
-- Internet access from the host (Paper, plugins and Maven/Gradle dependencies are
+- Internet access from the host (Paper, plugins and Maven dependencies are
   downloaded on first start/build).
 
 ## 1. Stop the old stack *before* pulling
 
-The old `docker-compose.yml` defines a service `mc` (Paper 26.2 on
-`./data`, port 25565) plus `playit`. Stop it while that file is still on disk,
-so that the old containers are removed and two playit agents never run with the same key:
+The previous layout had `velocity` / `survival` / `creative` (or the even older
+`mc` + `playit` prepucio compose). Stop it while that file is still on disk, so
+two playit agents never run with the same key:
 
 ```bash
 cd ~/mc
@@ -39,8 +43,8 @@ docker compose down          # with the OLD compose file
 docker ps -a                 # nothing from the old stack should remain
 ```
 
-If you already pulled, remove the leftovers by name (`docker ps -a`, then
-`docker rm -f <name>` for the old `*-mc-1` / `*-playit-1` containers).
+If you already pulled, remove leftovers by name (`docker rm -f velocity survival
+creative …`).
 
 ## 2. Pull the new layout
 
@@ -52,12 +56,13 @@ git fetch origin && git checkout main && git pull
 ## 3. Secrets (`.env`)
 
 `.env` already holds `PLAYIT_SECRET_KEY` and `DISCORD_WEBHOOK_URL`. Add the new
-variables listed in `.env.example`, using random hex values:
+variables listed in `.env.example`, using random hex values. Drop any stale
+`VELOCITY_*` / `RCON_PASSWORD_SURVIVAL` / `RCON_PASSWORD_CREATIVE` lines:
 
 ```bash
 cd ~/mc
-for v in VELOCITY_FORWARDING_SECRET MARIADB_ROOT_PASSWORD LUCKPERMS_DB_PASSWORD \
-         RCON_PASSWORD_SURVIVAL RCON_PASSWORD_CREATIVE; do
+for v in MARIADB_ROOT_PASSWORD LUCKPERMS_DB_PASSWORD COREPROTECT_DB_PASSWORD \
+         RCON_PASSWORD; do
   grep -q "^$v=." .env || echo "$v=$(openssl rand -hex 24)" >> .env
 done
 chmod 600 .env
@@ -65,128 +70,154 @@ diff <(grep -oE '^[A-Z_]+=' .env.example | sort) <(grep -oE '^[A-Z_]+=' .env | s
   && echo "all variables present"
 ```
 
-Keep hex (or other `[A-Za-z0-9]`) values. They are substituted into YAML/TOML.
-Store a copy of `.env` in your password manager.
+Keep hex (or other `[A-Za-z0-9]`) values. Store a copy of `.env` in your password
+manager.
 
-> If you change `LUCKPERMS_DB_PASSWORD` or `MARIADB_ROOT_PASSWORD` **after**
-> `./mariadb` was initialised, MariaDB keeps the old ones: change them in SQL too
-> (`ALTER USER`).
+> If you change `LUCKPERMS_DB_PASSWORD`, `COREPROTECT_DB_PASSWORD` or
+> `MARIADB_ROOT_PASSWORD` **after** `./mariadb` was initialised, MariaDB keeps
+> the old ones: change them in SQL too (`ALTER USER`).
 
 ## 4. Create the data dirs (owned by you)
 
-If Docker creates missing bind-mount dirs itself, they end up owned by root. Create them yourself first:
+If Docker creates missing bind-mount dirs itself, they end up owned by root.
+Create them yourself first:
 
 ```bash
 cd ~/mc
-mkdir -p velocity survival creative mariadb
+mkdir -p minecraft geyser mariadb
 ```
 
-## 5. Build the source-built plugins
+## 5. Build the source-built / CI plugins
 
 ```bash
 cd ~/mc
 scripts/build-plugins.sh
 ```
 
-This builds a small builder image (Maven + JDK 25, plus JDK 21 for
-PlotSquared's Gradle toolchain), then:
+This builds a small builder image (Maven + JDK 25), then:
 
-- builds **PlotSquared 7.6.1** (GPL source, commit `41f9e95`) → `plugins-built/creative/`
-- builds **CoreProtect CE 25.0** (commit `a561c56`, targets 26.3) → `plugins-built/survival/`
-- downloads **EssentialsX + EssentialsXSpawn 2.22.1-dev+28-f8724e2** (CI build #1833)
-  and checks their sha256 → both dirs
+- builds **CoreProtect CE 25.0** (commit `a561c56`, targets 26.3) with
+  `-Dproject.branch=development` (required for master CE builds) → `plugins-built/minecraft/`
+- downloads **EssentialsX + EssentialsXSpawn 2.22.1-dev+28-f8724e2** (CI #1833) with sha256
+- downloads **Floodgate Spigot 2.2.5-b141** with sha256 → `plugins-built/minecraft/`
+- downloads **Geyser Standalone 2.12.1-b1307** with sha256 → `plugins-built/geyser/`
 
-The first run takes several minutes (it downloads dependencies into
-`.build/cache`). Pins are in `scripts/plugins/versions.env`, and the result is listed
-in `plugins-built/MANIFEST.txt`. Re-run the script after changing a pin.
-`--clean` wipes the checkouts and caches.
+Pins are in `scripts/plugins/versions.env`. Re-run after changing a pin.
+`--clean` wipes checkouts and caches.
 
-All other plugins are downloaded by the containers from Modrinth, pinned by
-version ID in `docker-compose.yml`.
+All other plugins are downloaded by the `minecraft` container from Modrinth,
+pinned by version ID in `docker-compose.yml`.
 
-## 6. Start everything except the tunnel
+## 6. Seed the Geyser config (before first start)
+
+```bash
+cd ~/mc
+cp -n config/geyser/config.yml geyser/config.yml
+```
+
+Do **not** start `playit` yet. The Floodgate key does not exist until Paper has
+started once (next steps).
+
+## 7. Start everything except the tunnel
 
 ```bash
 cd ~/mc
 docker compose config -q && echo compose OK
-docker compose up -d mariadb velocity survival creative
-docker compose ps                      # wait for (healthy)
-docker compose logs -f survival        # until "Done (…)! For help, type "help""
+docker compose up -d mariadb minecraft
+# Wait until Paper is up, then start Geyser (shares minecraft's network namespace).
+docker compose up -d geyser
+docker compose ps
+docker compose logs -f minecraft        # until "Done (…)! For help, type "help""
 ```
 
-Check that there are no plugin errors:
+### Floodgate key (share with Geyser, never commit)
+
+Floodgate on Paper generates `minecraft/plugins/floodgate/key.pem` on first
+start. Geyser Standalone needs the **same** file next to its config:
 
 ```bash
-for c in survival creative velocity; do
-  echo "== $c"; docker logs "$c" 2>&1 | grep -E 'ERROR|Error occurred|Could not load' ; done
-docker exec survival rcon-cli plugins
-docker exec creative rcon-cli plugins
+# After minecraft has created the key:
+cp minecraft/plugins/floodgate/key.pem geyser/key.pem
+chmod 600 minecraft/plugins/floodgate/key.pem geyser/key.pem
+docker compose restart geyser
 ```
 
-Expected plugins:
+Confirm Geyser is happy:
 
-- **survival:** CoreProtect, Essentials, EssentialsSpawn, GriefPrevention, LuckPerms,
-  WorldEdit, WorldGuard, Chunky
-- **creative:** CoreProtect, Essentials, FastAsyncVoxelSniper, FastAsyncWorldEdit,
-  LuckPerms, Multiverse-Core, PlotSquared, ViaVersion, WorldGuard
+```bash
+docker compose logs geyser | grep -iE 'Done|floodgate|error|proxy|19132'
+# From inside minecraft's netns, UDP 19132 should be listening:
+docker exec minecraft sh -c 'cat /proc/net/udp /proc/net/udp6 2>/dev/null | head'
+```
 
-You'll also see these log lines, and they're harmless:
+### Both databases
 
-- Paper's "SERVER IS RUNNING IN OFFLINE/INSECURE MODE" warning (expected behind
-  Velocity).
+```bash
+docker exec mariadb sh -c 'mariadb -uroot -p"$MARIADB_ROOT_PASSWORD" -e "SHOW DATABASES;"'
+# Expect: luckperms and coreprotect (plus system DBs).
+```
+
+### Plugins
+
+```bash
+docker logs minecraft 2>&1 | grep -E 'ERROR|Error occurred|Could not load'
+docker exec minecraft rcon-cli plugins
+```
+
+Expected (names may vary slightly): CoreProtect, Essentials, EssentialsSpawn,
+FastAsyncVoxelSniper, FastAsyncWorldEdit, Floodgate, GriefPrevention, LuckPerms,
+Multiverse-Core, Multiverse-Inventories, Multiverse-NetherPortals, WorldGuard,
+Chunky. **No** ViaVersion, PlotSquared, regular WorldEdit, or Velocity plugins.
+
+Harmless log lines you may see:
+
 - Essentials' "LuckPerms without Vault".
-- Creative's "2 releases behind" notice.
-- An `Unable to write eula` line on the very first start of a fresh data dir. The
-  image then fixes ownership and continues.
+- An `Unable to write eula` line on the very first start of a fresh data dir.
 
-## 7. Permissions and the creative build world
+## 8. LuckPerms + creative world
 
 ```bash
 cd ~/mc
 scripts/luckperms/setup.sh
-docker compose restart creative
+docker compose restart minecraft   # once: FAWE writes config.yml, then the limits patch applies
+# After restart, wait for RCON, then re-apply groups if you like:
+scripts/luckperms/setup.sh --no-world
 ```
 
-`setup.sh` does three things:
+`setup.sh` does:
 
-- Applies `scripts/luckperms/groups.lp` (groups `default`, `builder`, `admin`)
-  through the survival console. LuckPerms stores the groups in MariaDB, so all three servers share them.
-- Creates the Multiverse world `build` (normal terrain) on creative.
-- Protects `build` with WorldGuard (`__global__`: `passthrough deny`, members
-  `g:builder g:admin`).
-
-At the end it prints the groups from the database. The script is safe to re-run.
-It rebuilds the groups from `groups.lp` each time and doesn't touch players.
-
-The **restart of creative** is needed once. FAWE writes its `config.yml` on its
-first start, and the FAWE limits patch
-(`config/patches/creative/fawe-limits.json`) is applied on every start after that.
+- Applies `scripts/luckperms/groups.lp` (`default`, `builder`, `admin`) over RCON.
+- Creates Multiverse world `creative` (normal terrain), forces creative + peaceful,
+  unlinks nether/end portals via Multiverse-NetherPortals, copies Paper per-world
+  limits into `minecraft/creative/paper-world.yml`.
+- Verifies: **no** LuckPerms `false` nodes; builder FAWE nodes only have
+  `world=creative`.
 
 Check:
 
 ```bash
-docker attach survival      # console; type:  lp listgroups   (detach: Ctrl-P Ctrl-Q)
-grep -A3 '^  builder:' creative/plugins/FastAsyncWorldEdit/config.yml
+docker exec minecraft rcon-cli "lp listgroups"
+docker exec minecraft rcon-cli "lp group builder permission info"
+grep -A3 '^  builder:' minecraft/plugins/FastAsyncWorldEdit/config.yml
+docker exec minecraft rcon-cli "mvinv list"     # or: mi list / mvinv info
 ```
 
 ### What the groups can do
 
-| Group | Survival | Creative | Network |
+| Group | Survival worlds | Creative world | Everywhere |
 |---|---|---|---|
-| `default` | `/tpa` `/tpahere` `/tpaccept` `/tpdeny`, `/home` `/sethome` (3 homes: Essentials `sethome-multiple.default`), `/spawn`, GriefPrevention claims | PlotSquared basics (the `plots.permpack.basic` nodes except download/save/buy/merge, listed one by one) + `plots.plot.1` (one plot via `/plot auto`), build in own plot; in world `plots`: `fawe.plotsquared` + basic WorldEdit (`//set`, `//replace`, selections, copy/paste, undo…), masked to own plots by FAWE region restrictions; FAWE `limits.default` | `/server`, `/msg` `/r` `/list` |
-| `builder` (inherits default) | same as default | `fawe.limit.builder` (higher limits); in world `build`: WorldGuard region member + `worldguard.region.bypass.build`, `fawe.permpack.basic` (FAWE's full builder command set, without admin nodes like `worldedit.reload`), `fawe.bypass.regions` (FAWE anywhere), FastAsyncVoxelSniper (`voxelsniper.sniper`, `voxelsniper.brush.*`); `/speed`, `/tp` | |
-| `admin` | `*` | `*` | `*` (also on Velocity) |
+| `default` | GriefPrevention claims; no FAWE | Build by hand only; no FAWE / VoxelSniper | Chat, `/tpa` `/tpahere` `/tpaccept`, `/home` `/sethome` (Essentials `sethome-multiple.default`), `/spawn`, `/survival`, `/creative` |
+| `builder` (inherits default) | same as default (**no FAWE**) | `fawe.limit.builder` + `fawe.permpack.basic` + `fawe.bypass.regions` + FastAsyncVoxelSniper; `/speed`, `/tp` | |
+| `admin` | `*` | `*` | `*` |
 
-FAWE limits (tune in `config/patches/creative/fawe-limits.json`, then restart creative):
+FAWE limits (tune in `config/patches/minecraft/fawe-limits.json`, then restart
+`minecraft`):
 
-| | `default` | `builder` |
+| | `default` (unused for FAWE) | `builder` |
 |---|---|---|
-| max-changes (blocks per edit) | 100 000 | 2 000 000 |
-| max-checks | 1 000 000 | 10 000 000 |
-| max-radius / brush radius | 32 / 10 | 128 / 32 |
-| max-iterations | 500 | 2 000 |
-| max-entities / blockstates | 64 / 256 | 512 / 4 096 |
-| history | 32 MB | 256 MB |
+| max-changes | 50 000 | 2 000 000 |
+| max-radius / brush | 16 / 8 | 128 / 32 |
+| history | 16 MB | 256 MB |
 | concurrent actions | 1 | 2 |
 
 ### Staff
@@ -194,28 +225,46 @@ FAWE limits (tune in `config/patches/creative/fawe-limits.json`, then restart cr
 Join once through playit (so LuckPerms knows your UUID), then:
 
 ```bash
-docker exec survival rcon-cli "lp user <name> parent add admin"
-docker exec survival rcon-cli "lp user <name> parent add builder"   # promote a builder
+docker exec minecraft rcon-cli "lp user <name> parent add admin"
+docker exec minecraft rcon-cli "lp user <name> parent add builder"
 ```
 
 Avoid OPs. Keep `ops.json` for the owner only, as a break-glass fallback.
 
 > ⚠️ **Don't give one user both `admin` and `builder`**, and never add explicit
-> `false` nodes to `default` or `builder`. In LuckPerms an exact `false` node
-> beats admin's `*` wildcard, so the negation would take that permission away
-> from the admin too. Every player keeps `default` as a parent, so this applies to
-> `default` as well. `groups.lp` currently contains **no** `false` nodes: it simply
-> leaves out what a group shouldn't have. To make a builder an admin, swap the groups:
-> `lp user <name> parent remove builder` then `lp user <name> parent add admin`.
+> `false` nodes to `default` or `builder`. In LuckPerms an exact `false` beats
+> admin's `*`. `groups.lp` contains **no** `false` nodes.
 
-## 8. Enable PROXY protocol in playit, then start the tunnel
+## 9. Enable PROXY protocol in playit, then start the tunnel
 
-Velocity has `haproxy-protocol = true`. From now on it **rejects every
-connection that doesn't start with a PROXY header**, so set playit up first:
+Paper has `proxies.proxy-protocol: true`. From now on it **rejects every
+connection that doesn't start with a PROXY header**, so set playit up **before**
+starting the agent.
 
-1. https://playit.gg/account/tunnels/ → the Minecraft Java tunnel.
-2. Local address: `127.0.0.1`, port `25565` (playit shares velocity's network namespace).
-3. **Proxy Protocol → Version 2**, then save.
+`playit` and `geyser` both use `network_mode: "service:minecraft"`, so local
+targets are loopback inside that namespace.
+
+### Java tunnel (required)
+
+1. https://playit.gg/account/tunnels/ → your **Minecraft Java** tunnel (or create one).
+2. Local address: `127.0.0.1`, port `25565`.
+3. **Proxy Protocol → Version 2**, then save. Do this **before** `docker compose up -d playit`.
+
+### Bedrock UDP tunnel (free plan)
+
+playit's free plan includes **4 ports** and supports a **Minecraft Bedrock**
+(UDP / classic) tunnel as well as the newer NetherNet type. This stack uses
+Geyser `transport: both` so classic **UDP 19132** (RakNet) works. NetherNet
+uses a separate UDP port `19133` inside the container and is not required for
+the free-plan UDP tunnel.
+
+1. Create a tunnel of type **Minecraft Bedrock** (UDP), not only NetherNet.
+2. Local address: `127.0.0.1`, port `19132` (Geyser RakNet in the same netns as playit).
+3. Optionally set **Proxy Protocol → Version 2** so Bedrock real IPs are
+   forwarded; Geyser already whitelists `127.0.0.0/8` for HAProxy headers from
+   the local agent (`config/geyser/config.yml`).
+4. (Optional) A second UDP tunnel to `127.0.0.1:19133` is only needed if you
+   want NetherNet as well.
 
 Then start the agent:
 
@@ -225,52 +274,62 @@ docker compose up -d playit
 docker compose logs -f playit      # tunnel connected
 ```
 
-Join through the playit address. You should land on **survival**. `/server creative`
-switches servers (26.3 clients work there through ViaVersion). In the Velocity log,
-your real IP should appear, not `127.0.0.1`.
+Join through the playit Java address. You should land in **survival**.
+`/creative` and `/survival` switch worlds. Your real IP should appear in the
+Paper log, not `127.0.0.1`.
 
-## 9. Survival spawn and pre-generating the world
+## 10. Survival spawn, WorldGuard, Chunky pregen
 
-Protect spawn with WorldGuard in game (as admin): select it with `//wand` and run `/rg define spawn`. Add flags as you like (e.g. `/rg flag spawn pvp deny`).
+Protect spawn with WorldGuard in game (as admin): select it with a wooden axe /
+FAWE wand and run `/rg define spawn`. Add flags as you like (e.g.
+`/rg flag spawn pvp deny`). Repeat a spawn region in `creative` if you want a
+protected hub there.
 
-Pre-generate chunks before opening, because generation is expensive on this CPU (Chunky is
-installed on survival only):
+Pre-generate survival before opening (Chunky; this CPU hates live generation):
 
 ```bash
-docker exec survival rcon-cli "chunky world world"
-docker exec survival rcon-cli "chunky center 0 0"
-docker exec survival rcon-cli "chunky radius 3000"
-docker exec survival rcon-cli "chunky start"
-docker exec survival rcon-cli "chunky progress"        # check now and then
-# optional, after the overworld:
-docker exec survival rcon-cli "chunky world world_nether" && \
-docker exec survival rcon-cli "chunky radius 1000" && docker exec survival rcon-cli "chunky start"
+docker exec minecraft rcon-cli "chunky world survival"
+docker exec minecraft rcon-cli "chunky center 0 0"
+docker exec minecraft rcon-cli "chunky radius 3000"
+docker exec minecraft rcon-cli "chunky start"
+docker exec minecraft rcon-cli "chunky progress"
+# optional:
+docker exec minecraft rcon-cli "chunky world survival_nether" && \
+docker exec minecraft rcon-cli "chunky radius 1000" && docker exec minecraft rcon-cli "chunky start"
 ```
 
-Watch disk space (`df -h /home`): a radius of 3000 is several GB. Chunky pauses
-on shutdown and resumes with `chunky continue`.
+Watch disk space (`df -h /home`). Chunky pauses on shutdown and resumes with
+`chunky continue`.
 
-## 10. After go-live
+## 11. Inventory-separation test checklist (before launch)
 
-- The old **`data/`** dir (the 26.2 world from `prepucio/`) is no longer used by
-  anything. Once the new network is live and backed up (step 11), archive it if you want
-  (e.g. to Drive), then delete it: `rm -rf ~/mc/data`. That frees about 280 MB.
+Do this with two accounts or by switching worlds carefully:
 
-## 11. Backups
+1. Join as a normal player. Take a unique item in **creative** (e.g. rename a
+   diamond with an anvil).
+2. Run `/survival`. Confirm the item is **gone** from inventory, armour, and
+   ender chest. XP / effects should reset to the survival group's state.
+3. Run `/creative` again — the creative item returns.
+4. From creative, `/tpa` a friend in survival and accept — inventories must still
+   not leak (Multiverse-Inventories swaps on world change).
+5. Die in creative and respawn — still no leak into survival.
+6. Relog in each world — inventories stay separated.
+7. As `builder`: `//set stone` works in **creative**, is refused in **survival**.
+8. As `default`: `//set` refused in both worlds.
+9. Chat and tab list show players in both worlds; `/tpa` works across worlds.
+
+## 12. Backups
 
 The backup system comes from PR #1: `scripts/backup/` (`backup.sh`, `offload.sh`,
 `prune-drive.sh`, `backup.conf`), `systemd/` (three `.service` + `.timer` pairs)
-and **[docs/BACKUPS.md](docs/BACKUPS.md)**, the authoritative guide. In short:
+and **[docs/BACKUPS.md](docs/BACKUPS.md)**. It expects containers `minecraft`,
+`geyser`, `mariadb` and dumps databases **`luckperms`** and **`coreprotect`**.
 
-1. Install the tools: `sudo apt-get install -y rclone zstd curl`.
-2. Create the rclone remotes `gdrive` (Google OAuth, headless) and `gdrive-crypt`
-   (crypt over `gdrive:mc-backups`), as in docs/BACKUPS.md §2. Store the crypt
-   password and salt in your password manager, because without them the Drive
-   backups can't be restored. Then `chmod 600 ~/.config/rclone/rclone.conf`.
-3. `.env` must contain **`DISCORD_WEBHOOK_URL`** (alerts) and
-   **`MARIADB_ROOT_PASSWORD`** (`mariadb-dump` of `luckperms`). Both are already
-   there after step 3.
-4. Enable the three timers. Only the timers: the services have no `[Install]` section.
+1. Install tools: `sudo apt-get install -y rclone zstd curl`.
+2. Create rclone remotes `gdrive` and `gdrive-crypt` as in docs/BACKUPS.md §2.
+   Store the crypt password and salt in your password manager.
+3. `.env` must contain `DISCORD_WEBHOOK_URL` and `MARIADB_ROOT_PASSWORD`.
+4. Enable the three timers:
 
    ```bash
    cd ~/mc
@@ -282,9 +341,16 @@ and **[docs/BACKUPS.md](docs/BACKUPS.md)**, the authoritative guide. In short:
    systemctl list-timers 'trapaholics-*'
    ```
 
-5. Run one backup by hand and check that it works:
+5. Run one backup by hand:
    `sudo systemctl start trapaholics-backup.service && journalctl -u trapaholics-backup -n 50`.
-   Practise a restore before opening (docs/BACKUPS.md, "Restore procedure").
+
+## 13. After go-live
+
+- The old **`data/`** dir (26.2 world from `prepucio/`) is unused. Once the new
+  stack is live and backed up, archive it if you want, then `rm -rf ~/mc/data`.
+- **Plots later:** when PlotSquared supports 26.3, add a plot world as another
+  Multiverse world on this same server (see ARCHITECTURE §5.5 / git history for
+  the earlier plan). No Velocity required.
 
 ---
 
@@ -293,57 +359,16 @@ and **[docs/BACKUPS.md](docs/BACKUPS.md)**, the authoritative guide. In short:
 ```bash
 docker compose ps
 docker compose logs -f <service>
-docker exec survival rcon-cli <command>     # also creative; velocity has no RCON:
-docker attach velocity                      #   console, detach with Ctrl-P Ctrl-Q
-docker compose restart creative             # restart one server, others stay up
+docker exec minecraft rcon-cli <command>
+docker compose restart minecraft
 docker compose up -d                        # apply compose/template changes
 ```
 
-- **Config templates:** files under `config/<service>/` are copied into the data
-  dir on start, with `${CFG_*}` placeholders filled from the environment.
-  Files under `config/patches/<service>/` are re-applied on **every** start.
-  Make lasting changes in git, not only on the live files.
-
-> ⚠️ **Template sync only copies a template that is newer than the live file.**
-> After a `git pull`, a changed template is usually newer and gets copied. But
-> if the live file was modified more recently (by you, or by a plugin rewriting
-> its config), the template is **silently skipped**. That matters for
-> `config/velocity/velocity.toml` (e.g. `haproxy-protocol` when switching to
-> frp in Phase 2) and the PlotSquared `worlds.yml` seed. To apply a changed
-> template, remove the live copy and restart the service. The template is then copied in fresh:
->
-> ```bash
-> rm velocity/velocity.toml && docker compose restart velocity
-> ```
->
-> Or edit the live file by hand to match. Check the result with
-> `docker compose logs velocity | grep -i interpolat` and by reading the live file.
-> Settings applied through `config/patches/` (Velocity forwarding in Paper,
-> generators, FAWE limits) don't have this problem.
-- **Velocity forwarding secret:** comes from `VELOCITY_FORWARDING_SECRET` (env) on
-  all three servers. `velocity/forwarding.secret` is ignored.
-- **Bumping versions:** change the pin (image tag, `PAPER_BUILD`, Modrinth
-  version ID, or `scripts/plugins/versions.env`), back up, then
-  `scripts/build-plugins.sh` if needed and `docker compose up -d <service>`. Test on
-  creative first. World upgrades are one-way.
-
-## Creative 26.2 → 26.3 upgrade path
-
-Creative runs 26.2 only because PlotSquared 7.6.1 is broken on 26.3
-([PlotSquared#4960](https://github.com/IntellectualSites/PlotSquared/issues/4960)).
-When a PlotSquared release fixes it:
-
-1. **Back up** (full backup, or at least `./creative` and a DB dump). The upgrade is one-way.
-2. `scripts/plugins/versions.env`: set `PLOTSQUARED_REF` and `PLOTSQUARED_COMMIT` to
-   the fixed tag. In `scripts/build-plugins.sh`, also copy the CoreProtect 25 jar into
-   `plugins-built/creative/`. Run `scripts/build-plugins.sh`.
-3. `docker-compose.yml`, `creative` service:
-   - `VERSION: "26.3"` and `PAPER_BUILD` = the same build as survival.
-   - In `MODRINTH_PROJECTS`: **remove** `viaversion:…` and `coreprotect:3sehX6Sg`
-     (it's now built from source), and change WorldGuard to `worldguard:fiHLM6oY`
-     (7.0.21).
-   - Check that FAWE, Multiverse-Core, FastAsyncVoxelSniper and LuckPerms pins still
-     list 26.3 on Modrinth. The current ones already do.
-4. `docker compose up -d creative`, then check the log for plugin errors and test
-   `/plot auto` and FAWE in a plot.
-5. Update ARCHITECTURE.md §4/§5.6 ("creative on 26.3").
+- **Config templates:** files under `config/minecraft/` are copied into the data
+  dir on start when newer than the live file; `${CFG_*}` placeholders are filled.
+  `config/patches/minecraft/` is re-applied on **every** start.
+- **Geyser config** is not managed by itzg — edit `geyser/config.yml` (seeded from
+  `config/geyser/config.yml`) and `docker compose restart geyser`.
+- **Bumping versions:** change the pin (image tag, `PAPER_BUILD`, Modrinth version
+  ID, or `scripts/plugins/versions.env`), back up, run `scripts/build-plugins.sh`
+  if needed, then `docker compose up -d`. World upgrades are one-way.

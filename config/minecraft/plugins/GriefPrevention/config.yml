@@ -1,0 +1,12 @@
+# GriefPrevention — claims in survival worlds only (ARCHITECTURE.md §5.5).
+# Creative claims are disabled; CoreProtect covers rollback there.
+# Keys match GriefPrevention 16.18.x; the plugin merges missing defaults on start.
+
+GriefPrevention:
+  Claims:
+    # Empty EnabledWorlds = all worlds except those listed in DisabledWorlds.
+    EnabledWorlds: []
+    DisabledWorlds:
+      - creative
+    Mode:
+      creative: Disabled
