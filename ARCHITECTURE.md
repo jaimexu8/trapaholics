@@ -328,10 +328,13 @@ Velocity proxy.
 - `creative` uses **normal generated terrain**. Nether and end portals are disabled
   there, so nobody can walk from creative into the survival nether with creative
   items.
-- **Moving between worlds:** simple commands such as `/survival` and `/creative`
-  (Multiverse or EssentialsX command aliases, or a tiny custom plugin) that teleport
-  to each world's spawn. Players can't `/tpa` from creative into survival while
-  holding creative items, because inventories swap on world change (below).
+- **Moving between worlds:** `/survival` and `/creative` are Bukkit command
+  aliases for Multiverse-Inventories' last-location destination
+  (`mv tp ll:survival` / `mv tp ll:creative`). They return the player to where
+  they **last were in that group** (for survival: anywhere in overworld / nether /
+  end), saved in the group profile so it survives restarts; with nothing saved
+  they go to the world's spawn. Players can't `/tpa` from creative into survival
+  while holding creative items, because inventories swap on world change (below).
 - **Inventory groups (Multiverse-Inventories):**
   - group `survival` = `survival`, `survival_nether`, `survival_the_end`;
   - group `creative` = `creative`;

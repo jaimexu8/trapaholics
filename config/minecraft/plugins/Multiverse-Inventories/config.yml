@@ -6,7 +6,19 @@
 # doesn't trigger it either. Gamemode itself is forced by Multiverse-Core for
 # everyone: admin gets explicit `mv.bypass.gamemode.*` false nodes
 # (scripts/luckperms/groups.lp). See DEPLOY.md.
+#
+# Last location (/survival and /creative, config/minecraft/commands.yml): the
+# optional share `last_location` must be listed here, otherwise `shares: [all]`
+# in groups.yml leaves it out and nothing is recorded. It is saved in each
+# player's group profile (plugins/Multiverse-Inventories/groups/<group>/), so it
+# survives restarts. apply-last-location-for-all-teleports: false = ONLY
+# `mv tp ll:<world>` uses it; /spawn, /home, /tpa, /warp and portals still go
+# where they point (the inventory swap happens either way).
 share-handling:
   enable-bypass-permissions: false
   enable-gamemode-share-handling: false
   default-ungrouped-worlds: false
+  active-optional-shares:
+    - last_location
+sharables:
+  apply-last-location-for-all-teleports: false

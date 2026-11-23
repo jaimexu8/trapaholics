@@ -56,8 +56,9 @@ lp group default permission set essentials.sethome.multiple true
 lp group default permission set essentials.sethome.multiple.default true
 lp group default permission set essentials.spawn true
 
-# /survival and /creative (bukkit aliases → mv tp <world>).
-# Multiverse 5 finer teleport: self + type w + world name.
+# /survival and /creative (bukkit aliases → mv tp ll:<world>, Multiverse-Inventories
+# last-location destination). Multiverse 5 finer teleport: self + type + world name:
+# type `ll` for the aliases, type `w` for plain `/mv tp <world>`.
 lp group default permission set multiverse.access.survival true
 lp group default permission set multiverse.access.survival_nether true
 lp group default permission set multiverse.access.survival_the_end true
@@ -66,6 +67,8 @@ lp group default permission set multiverse.teleport.self.w.survival true
 lp group default permission set multiverse.teleport.self.w.survival_nether true
 lp group default permission set multiverse.teleport.self.w.survival_the_end true
 lp group default permission set multiverse.teleport.self.w.creative true
+lp group default permission set multiverse.teleport.self.ll.survival true
+lp group default permission set multiverse.teleport.self.ll.creative true
 lp group default permission set multiverse.core.list.worlds true
 
 # GriefPrevention claims — survival worlds only (plugin Mode.creative=Disabled).
