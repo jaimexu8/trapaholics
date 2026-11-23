@@ -38,6 +38,10 @@ services:
         condition: service_healthy
     environment:
       EULA: "TRUE"
+      # Run Paper as the deploy user so ./minecraft stays readable/writable by
+      # it (backups, Floodgate key copy). Set HOST_UID/HOST_GID in .env.
+      UID: ${HOST_UID:-1000}
+      GID: ${HOST_GID:-1000}
       TYPE: PAPER
       VERSION: "26.3"
       PAPER_BUILD: "258"
@@ -95,7 +99,8 @@ services:
     image: eclipse-temurin:21.0.9_10-jre-alpine
     container_name: geyser
     restart: unless-stopped
-    user: "1000:1000"
+    # Same uid/gid as the deploy user so ./geyser stays writable by it.
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"
     networks:
       mc:
         ipv4_address: 172.28.10.10
