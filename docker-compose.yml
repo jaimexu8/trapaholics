@@ -56,7 +56,7 @@ services:
       USES_PROXY_PROTOCOL: "true"
       ENABLE_RCON: "true"
       RCON_PASSWORD: ${RCON_PASSWORD:?set in .env}
-      MOTD: "trapaholics"
+      MOTD: "we not from 63rd"
       DIFFICULTY: hard
       MODE: survival
       LEVEL: survival
