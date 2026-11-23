@@ -1,0 +1,21 @@
+[Unit]
+Description=trapaholics backup offload to encrypted Google Drive
+Documentation=file:///home/jt/mc/docs/BACKUPS.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=jt
+Group=jt
+WorkingDirectory=/home/jt/mc
+Environment=HOME=/home/jt
+UMask=0077
+ExecStart=/home/jt/mc/scripts/backup/offload.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=2h
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trapaholics-offload

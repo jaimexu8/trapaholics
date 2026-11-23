@@ -1,0 +1,23 @@
+[Unit]
+Description=trapaholics Minecraft full-network backup
+Documentation=file:///home/jt/mc/docs/BACKUPS.md
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+User=jt
+Group=jt
+WorkingDirectory=/home/jt/mc
+Environment=HOME=/home/jt
+UMask=0077
+ExecStart=/home/jt/mc/scripts/backup/backup.sh
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+TimeoutStartSec=2h
+# Allow save-on restore on stop: ≥ 2 × DOCKER_TIMEOUT_SEC (60s) for save-on + slack.
+TimeoutStopSec=900
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=trapaholics-backup
