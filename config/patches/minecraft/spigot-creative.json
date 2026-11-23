@@ -1,0 +1,19 @@
+{
+  "file": "/data/spigot.yml",
+  "ops": [
+    {
+      "$put": {
+        "path": "$['world-settings']",
+        "key": "creative",
+        "value": {
+          "hopper-amount": 1,
+          "nerf-spawner-mobs": true,
+          "ticks-per": {
+            "hopper-transfer": 16,
+            "hopper-check": 8
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,12 @@
+# GriefPrevention — claims in survival worlds only (ARCHITECTURE.md §5.5).
+# Creative claims are Disabled; CoreProtect covers rollback there.
+# Keys match GriefPrevention 16.18.x (`Claims.Mode.<world>`). Mode values:
+# Survival | Creative | SurvivalRequiringClaims | Disabled.
+
+GriefPrevention:
+  Claims:
+    Mode:
+      survival: Survival
+      survival_nether: Survival
+      survival_the_end: Survival
+      creative: Disabled

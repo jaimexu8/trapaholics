@@ -1,0 +1,111 @@
+# Geyser Standalone — Bedrock → Paper (ARCHITECTURE.md §5.7).
+# Seed into ./geyser/config.yml on first deploy (see DEPLOY.md).
+# Keys verified against Geyser 2.12.1-b1307 (config-version 12).
+#
+# NetherNet is the ONLY Bedrock transport (Bedrock 26.60+ no longer connects over
+# RakNet). The playit agent shares minecraft's network namespace and reaches this
+# container at its fixed compose IP 172.28.10.10 (TCP 19132 signaling, UDP 19133
+# media).
+# Geyser connects to Paper at hostname `minecraft:25565` with PROXY protocol.
+
+bedrock:
+  address: 0.0.0.0
+  # Built-in signaling listens here on TCP (and on UDP only if webrtc-port is 0).
+  port: 19132
+  # NetherNet media (WebRTC) UDP port — must differ from `port`.
+  webrtc-port: 19133
+  # nethernet only; RakNet (old clients) is deliberately not offered.
+  transport: nethernet
+  signaling:
+    mode: builtin
+    # REQUIRED: the PUBLIC address of the playit NetherNet *UDP media* tunnel,
+    # as host:port exactly as the playit dashboard shows it (without a port Geyser
+    # appends webrtc-port 19133, which is wrong behind playit). Players get this
+    # address from signaling and send WebRTC media to it.
+    # The placeholder uses the reserved .invalid TLD on purpose: it never
+    # resolves, so Geyser refuses to start signaling until you replace it
+    # (DEPLOY.md step 9). Example:  - "something.at.ply.gg:41234"
+    advertise-addresses:
+      - "replace-with-playit-nethernet-udp-address.invalid"
+    # Prefer the explicit playit address over STUN (STUN sees CGNAT, not playit).
+    stun-discovery: false
+    builtin:
+      https:
+        certificate: ''
+        private-key: ''
+        password: ''
+    nxs:
+      token: ''
+      endpoint: https://agent.warden.cloud
+
+java:
+  # Compose DNS name on the `mc` network (geyser is NOT in minecraft's netns).
+  address: minecraft
+  port: 25565
+  auth-type: floodgate
+  forward-hostname: false
+
+motd:
+  primary-motd: trapaholics
+  secondary-motd: Java + Bedrock
+  passthrough-motd: true
+  max-players: 100
+  passthrough-player-counts: true
+  ping-passthrough-interval: 3
+
+gameplay:
+  server-name: trapaholics
+  cooldown-type: crosshair
+  command-suggestions: true
+  show-coordinates: true
+  disable-bedrock-scaffolding: false
+  nether-roof-workaround: false
+  emotes-enabled: true
+  block-legacy-codes: true
+  unusable-space-block: minecraft:barrier
+  enable-custom-content: true
+  force-resource-packs: true
+  enable-integrated-pack: true
+  forward-player-ping: false
+  xbox-achievements-enabled: false
+  max-visible-custom-skulls: 128
+  custom-skull-render-distance: 32
+
+default-locale: system
+log-player-ip-addresses: true
+saved-user-logins: []
+pending-authentication-timeout: 120
+notify-on-new-bedrock-update: true
+
+advanced:
+  cache-images: 0
+  scoreboard-packet-threshold: 20
+  add-team-suggestions: true
+  resource-pack-urls: []
+  floodgate-key-file: key.pem
+  java:
+    # Required: Paper rejects connections without a PROXY header.
+    use-haproxy-protocol: true
+  bedrock:
+    broadcast-port: 0
+    compression-level: 6
+    # OFF (empty) by default. Listing any address turns HAProxy protocol on.
+    # Bedrock players then show the playit agent's address (172.28.10.2) instead
+    # of their real IP. Only fill this in (with 172.28.10.2) and
+    # webrtc-proxy-protocol-relays below after confirming playit really sends
+    # PROXY v2 on the Bedrock NetherNet tunnels: with relays set, media is ONLY
+    # accepted with a PROXY header (DEPLOY.md step 9, "Bedrock real IPs").
+    haproxy-protocol-whitelisted-ips: []
+    signaling-trusted-proxies: []
+    webrtc-proxy-protocol-relays: []
+    prefer-signaling-proxy-address: false
+    use-waterdogpe-forwarding: false
+    mtu: 1400
+    validate-bedrock-login: true
+    nethernet-debug: false
+
+enable-metrics: false
+debug-mode: false
+
+# Do not change!
+config-version: 12

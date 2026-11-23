@@ -9,12 +9,16 @@ rclone.conf
 # Server data (worlds, plugin data, logs, jars) — backed up by the backup system, not git.
 # Tracked config templates for these live in config/<service>/ instead.
 /data/
-/velocity/
-/survival/
-/creative/
+/minecraft/
+/geyser/
 /mariadb/
 /backups/
 
 # Plugin build output and source checkouts (scripts/build-plugins.sh)
 /plugins-built/
 /.build/
+
+# Local smoke-test artefacts (never commit)
+/.smoke-env
+/.smoke-compose.override.yml
+/.smoke-data/

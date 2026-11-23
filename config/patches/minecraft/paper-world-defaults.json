@@ -1,0 +1,6 @@
+{
+  "file": "/data/config/paper-world-defaults.yml",
+  "ops": [
+    { "$set": { "path": "$.chunks['max-auto-save-chunks-per-tick']", "value": 8, "value-type": "int" } }
+  ]
+}

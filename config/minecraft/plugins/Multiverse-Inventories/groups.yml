@@ -1,0 +1,16 @@
+# Inventory groups (ARCHITECTURE.md §5.5). survival shares across overworld/nether/end;
+# creative is isolated. Multiverse-Inventories 5.3.x accepts the aggregate share `all`
+# (inventory, armor, ender_chest, exp, health, hunger, potion_effects, …).
+groups:
+  survival:
+    worlds:
+      - survival
+      - survival_nether
+      - survival_the_end
+    shares:
+      - all
+  creative:
+    worlds:
+      - creative
+    shares:
+      - all

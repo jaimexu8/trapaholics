@@ -1,0 +1,12 @@
+# CoreProtect — MariaDB storage (database `coreprotect`).
+# ${CFG_COREPROTECT_DB_PASSWORD} is filled by the itzg image from compose env.
+
+# Database engine used by CoreProtect. Valid values are duckdb, clickhouse, sqlite, and mysql.
+database-type: mysql
+
+# Connection settings for MySQL / MariaDB.
+mysql-host: mariadb
+mysql-port: 3306
+mysql-database: coreprotect
+mysql-username: coreprotect
+mysql-password: ${CFG_COREPROTECT_DB_PASSWORD}

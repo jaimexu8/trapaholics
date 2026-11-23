@@ -1,185 +1,138 @@
-# trapaholics.net — Phase 1 network (see ARCHITECTURE.md §3, §5, §8, §9).
+# trapaholics.net — Phase 1 one-server stack (ARCHITECTURE.md §3, §5, §8, §9).
 #
-#   playit ──(shares velocity's netns)──► velocity:25565 ─┬─► survival:25565 (Paper 26.3)
-#                                                         └─► creative:25565 (Paper 26.2 + ViaVersion)
-#   velocity / survival / creative ──► mariadb:3306 (LuckPerms; `db` network is internal-only)
+#   playit ──(shares minecraft's netns)──► 127.0.0.1:25565 (Paper)
+#        └─ Bedrock NetherNet ──────────► 172.28.10.10:{19132,19133} (geyser on mc net)
+#   geyser ──► minecraft:25565 (PROXY protocol)
+#   minecraft ──► mariadb:3306 (LuckPerms + CoreProtect; `db` internal-only)
 #
 # No host ports are published: the only way in is the playit tunnel.
 # Secrets come from .env (see .env.example). Every image and server/plugin
 # version is pinned; never use `latest`.
 #
-# Data (gitignored, bind-mounted):    ./velocity ./survival ./creative ./mariadb
-# Tracked templates (read-only):      ./config/<service> -> synced into the data dir on
+# Data (gitignored, bind-mounted):    ./minecraft ./geyser ./mariadb
+# Tracked templates (read-only):      ./config/minecraft -> synced into /data on
 #                                     start (only when the template is newer than the
 #                                     live file); ${CFG_*} placeholders are filled from
 #                                     the environment while copying.
-# Patches (read-only):                ./config/patches/<service> -> re-applied every start.
-# Source-built / CI jars (gitignored): ./plugins-built/<service> (scripts/build-plugins.sh)
-#                                     -> /plugins, copied into /data/plugins on start.
+# Patches (read-only):                ./config/patches/minecraft -> re-applied every start.
+# Source-built / CI jars (gitignored): ./plugins-built/minecraft|/geyser
+#                                     (scripts/build-plugins.sh)
 
+# `-p` and COMPOSE_PROJECT_NAME take precedence over this, which is how
+# scripts/smoke/run-local.sh runs as the separate project `trapaholics-smoke`.
 name: trapaholics
 
-x-paper-common: &paper-common
-  image: itzg/minecraft-server:2026.11.0-java25
-  restart: unless-stopped
-  tty: true
-  stdin_open: true
-  networks: [mc, db]
-  depends_on:
-    mariadb:
-      condition: service_healthy
-
-x-paper-env: &paper-env
-  EULA: "TRUE"
-  TYPE: PAPER
-  TZ: Etc/UTC
-  USE_AIKAR_FLAGS: "true"
-  # Behind Velocity: Mojang auth happens at the proxy (online-mode=true there).
-  ONLINE_MODE: "FALSE"
-  ENABLE_WHITELIST: "FALSE"         # writes white-list=false (26.3 defaults it to true)
-  ENABLE_RCON: "true"
-  # Tracked templates: ./config/<svc> is mounted at /config and synced into /data.
-  COPY_CONFIG_DEST: /data
-  # JSON-path patches re-applied on every start (Velocity forwarding, generators...).
-  PATCH_DEFINITIONS: /patches
-  # Placeholders usable in templates/patches (prefix CFG_).
-  CFG_VELOCITY_FORWARDING_SECRET: ${VELOCITY_FORWARDING_SECRET:?set in .env}
-  # Modrinth plugins are pinned by immutable version ID; no transitive downloads.
-  MODRINTH_DOWNLOAD_DEPENDENCIES: none
-  # LuckPerms reads LUCKPERMS_* env vars as config overrides.
-  LUCKPERMS_STORAGE_METHOD: mariadb
-  LUCKPERMS_DATA_ADDRESS: mariadb:3306
-  LUCKPERMS_DATA_DATABASE: luckperms
-  LUCKPERMS_DATA_USERNAME: luckperms
-  LUCKPERMS_DATA_PASSWORD: ${LUCKPERMS_DB_PASSWORD:?set in .env}
-  LUCKPERMS_MESSAGING_SERVICE: sql
-
 services:
-  velocity:
-    image: itzg/mc-proxy:2026.11.2-java25
-    container_name: velocity
+  minecraft:
+    image: itzg/minecraft-server:2026.11.0-java25
+    container_name: minecraft
     restart: unless-stopped
     tty: true
     stdin_open: true
-    networks: [mc, db]
+    networks:
+      mc:
+        ipv4_address: 172.28.10.2
+      db:
     depends_on:
       mariadb:
         condition: service_healthy
     environment:
-      TYPE: VELOCITY
-      VELOCITY_VERSION: "4.3.1"
-      VELOCITY_BUILD_ID: "45"
-      MEMORY: 512M
+      EULA: "TRUE"
+      TYPE: PAPER
+      VERSION: "26.3"
+      PAPER_BUILD: "258"
+      MEMORY: 10G
       TZ: Etc/UTC
-      # Read natively by Velocity; takes precedence over forwarding.secret.
-      VELOCITY_FORWARDING_SECRET: ${VELOCITY_FORWARDING_SECRET:?set in .env}
-      # haproxy-protocol = true, so the health check must send a PROXY header too.
-      HEALTH_USE_PROXY: "true"
-      MINECRAFT_VERSION: "26.3"
+      USE_AIKAR_FLAGS: "true"
+      ONLINE_MODE: "TRUE"
+      ENABLE_WHITELIST: "FALSE"         # writes white-list=false (26.3 defaults it to true)
+      # Paper proxies.proxy-protocol is on; without this, mc-health's status ping
+      # is rejected and the container stays unhealthy.
+      USES_PROXY_PROTOCOL: "true"
+      ENABLE_RCON: "true"
+      RCON_PASSWORD: ${RCON_PASSWORD:?set in .env}
+      MOTD: "trapaholics"
+      DIFFICULTY: hard
+      MODE: survival
+      LEVEL: survival
+      VIEW_DISTANCE: "10"
+      SIMULATION_DISTANCE: "8"
+      SPAWN_PROTECTION: "0"             # spawn is protected with WorldGuard instead
+      COPY_CONFIG_DEST: /data
+      PATCH_DEFINITIONS: /patches
       MODRINTH_DOWNLOAD_DEPENDENCIES: none
+      # LuckPerms 5.5.71, Multiverse-Core 5.8.2, Multiverse-Inventories 5.3.6 (26.3),
+      # FAWE 2.16.3, FastAsyncVoxelSniper 3.2.5, WorldGuard 7.0.21, GriefPrevention 16.18.8,
+      # Chunky 1.5.66. EssentialsX(+Spawn) dev, CoreProtect 25.0 (source), Floodgate come
+      # from plugins-built/minecraft. spark is built into Paper. NO ViaVersion / PlotSquared /
+      # regular WorldEdit / Velocity plugins.
       MODRINTH_PROJECTS: |
-        luckperms:tamnmXad
-      LUCKPERMS_SERVER: velocity
+        luckperms:b0mk8uS6
+        multiverse-core:de7TbcZG
+        multiverse-inventories:86s1EwyC
+        multiverse-netherportals:RRa80eDI
+        fastasyncworldedit:lmHhJ4ZF
+        fastasyncvoxelsniper:AnYq3r1h
+        worldguard:fiHLM6oY
+        griefprevention:MtwPHMAS
+        chunky:RBuKjN4k
       LUCKPERMS_STORAGE_METHOD: mariadb
       LUCKPERMS_DATA_ADDRESS: mariadb:3306
       LUCKPERMS_DATA_DATABASE: luckperms
       LUCKPERMS_DATA_USERNAME: luckperms
       LUCKPERMS_DATA_PASSWORD: ${LUCKPERMS_DB_PASSWORD:?set in .env}
-      LUCKPERMS_MESSAGING_SERVICE: sql
+      CFG_COREPROTECT_DB_PASSWORD: ${COREPROTECT_DB_PASSWORD:?set in .env}
     volumes:
-      # itzg/mc-proxy hardcodes its data dir to /server (not /data).
-      - ./velocity:/server
-      - ./config/velocity:/config:ro
+      - ./minecraft:/data
+      - ./config/minecraft:/config:ro
+      - ./config/patches/minecraft:/patches:ro
+      - ./plugins-built/minecraft:/plugins:ro
 
-  survival:
-    <<: *paper-common
-    container_name: survival
+  # On the normal `mc` network (NOT network_mode:service:minecraft) so a minecraft
+  # restart does not tear down Geyser's networking. Fixed IP so playit (in
+  # minecraft's netns) can target it without relying on Docker DNS.
+  geyser:
+    image: eclipse-temurin:21.0.9_10-jre-alpine
+    container_name: geyser
+    restart: unless-stopped
+    user: "1000:1000"
+    networks:
+      mc:
+        ipv4_address: 172.28.10.10
+    depends_on:
+      minecraft:
+        condition: service_started
+    working_dir: /data
     environment:
-      <<: *paper-env
-      VERSION: "26.3"
-      PAPER_BUILD: "258"
-      MEMORY: 6G
-      MOTD: "trapaholics survival"
-      DIFFICULTY: hard
-      MODE: survival
-      LEVEL: world
-      VIEW_DISTANCE: "10"
-      SIMULATION_DISTANCE: "8"
-      SPAWN_PROTECTION: "0"         # spawn is protected with WorldGuard instead
-      RCON_PASSWORD: ${RCON_PASSWORD_SURVIVAL:?set in .env}
-      LUCKPERMS_SERVER: survival
-      # LuckPerms 5.5.71, GriefPrevention 16.18.8, WorldEdit 7.4.6, WorldGuard 7.0.21,
-      # Chunky 1.5.66 (world pre-generation, admin-only; all declare 26.3).
-      # EssentialsX(+Spawn) dev and CoreProtect 25.0 come from plugins-built/survival.
-      # spark is built into Paper.
-      MODRINTH_PROJECTS: |
-        luckperms:b0mk8uS6
-        griefprevention:MtwPHMAS
-        worldedit:YFnqiUlL
-        worldguard:fiHLM6oY
-        chunky:RBuKjN4k
+      TZ: Etc/UTC
+      JAVA_TOOL_OPTIONS: "-Xms256M -Xmx512M"
+    command:
+      - java
+      - -jar
+      - /opt/Geyser-Standalone.jar
+      - --nogui
     volumes:
-      - ./survival:/data
-      - ./config/survival:/config:ro
-      - ./config/patches/survival:/patches:ro
-      - ./plugins-built/survival:/plugins:ro
-
-  creative:
-    <<: *paper-common
-    container_name: creative
-    environment:
-      <<: *paper-env
-      # TEMPORARY: 26.2 until PlotSquared fixes #4960 (DEPLOY.md has the upgrade path).
-      VERSION: "26.2"
-      PAPER_BUILD: "135"
-      MEMORY: 4G
-      MOTD: "trapaholics creative"
-      MODE: creative
-      FORCE_GAMEMODE: "true"
-      DIFFICULTY: peaceful
-      SPAWN_MONSTERS: "false"
-      ALLOW_NETHER: "false"         # building server: no nether/end (the end via bukkit.yml patch)
-      # The main (spawn) world is the PlotSquared plot world; `build` is a Multiverse world.
-      LEVEL: plots
-      SPAWN_PROTECTION: "0"
-      RCON_PASSWORD: ${RCON_PASSWORD_CREATIVE:?set in .env}
-      LUCKPERMS_SERVER: creative
-      # All declare 26.2: ViaVersion 5.12.2, LuckPerms 5.5.71, FAWE 2.16.3,
-      # Multiverse-Core 5.8.2, WorldGuard 7.0.19 (7.0.20+ dropped 26.2),
-      # FastAsyncVoxelSniper 3.2.5, CoreProtect 24.1.
-      # PlotSquared 7.6.1 (source build) + EssentialsX dev come from plugins-built/creative.
-      MODRINTH_PROJECTS: |
-        viaversion:Fkfcr89K
-        luckperms:b0mk8uS6
-        fastasyncworldedit:lmHhJ4ZF
-        multiverse-core:de7TbcZG
-        worldguard:TtfwTyi6
-        fastasyncvoxelsniper:AnYq3r1h
-        coreprotect:3sehX6Sg
-    volumes:
-      - ./creative:/data
-      - ./config/creative:/config:ro
-      - ./config/patches/creative:/patches:ro
-      - ./plugins-built/creative:/plugins:ro
+      - ./geyser:/data
+      - ./plugins-built/geyser/Geyser-Standalone.jar:/opt/Geyser-Standalone.jar:ro
 
   mariadb:
-    image: mariadb:12.3.3          # 12.3 = current MariaDB LTS series (`mariadb:lts`)
+    image: mariadb:12.3.3
     container_name: mariadb
     restart: unless-stopped
     networks: [db]
     environment:
       TZ: Etc/UTC
       MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD:?set in .env}
-      MARIADB_DATABASE: luckperms
-      MARIADB_USER: luckperms
-      MARIADB_PASSWORD: ${LUCKPERMS_DB_PASSWORD:?set in .env}
       MARIADB_AUTO_UPGRADE: "1"
+      LUCKPERMS_DB_PASSWORD: ${LUCKPERMS_DB_PASSWORD:?set in .env}
+      COREPROTECT_DB_PASSWORD: ${COREPROTECT_DB_PASSWORD:?set in .env}
     command:
       - --innodb-buffer-pool-size=192M
       - --max-connections=60
       - --performance-schema=OFF
     volumes:
       - ./mariadb:/var/lib/mysql
+      - ./config/mariadb/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
       interval: 10s
@@ -192,17 +145,27 @@ services:
     image: ghcr.io/playit-cloud/playit-agent:1.2.0
     container_name: playit
     restart: unless-stopped
-    # Shares velocity's network namespace, so the tunnel target is 127.0.0.1:25565.
-    network_mode: "service:velocity"
-    depends_on: [velocity]
+    # Shares minecraft's network namespace: Java tunnel → 127.0.0.1:25565.
+    # Bedrock NetherNet tunnels target geyser's fixed IP 172.28.10.10 (see DEPLOY.md).
+    # restart: true re-attaches playit when minecraft is recreated.
+    network_mode: "service:minecraft"
+    depends_on:
+      minecraft:
+        condition: service_started
+        restart: true
+      geyser:
+        condition: service_started
     environment:
       - SECRET_KEY=${PLAYIT_SECRET_KEY:?set in .env}
 
 networks:
-  # Proxy <-> backends. Not `internal`, because the containers need outbound
-  # internet (Mojang auth, Paper/plugin downloads, the playit tunnel).
+  # Game traffic. Fixed subnet so geyser keeps a stable IP for playit.
+  # Not `internal`: containers need outbound internet (Mojang, downloads, playit).
   # No ports are published on the host.
   mc:
+    ipam:
+      config:
+        - subnet: 172.28.10.0/24
   # Database network: internal only (no route outside the host's Docker).
   db:
     internal: true

@@ -1,0 +1,31 @@
+# Paper per-world overrides for the `creative` world (ARCHITECTURE §5.6): tighter
+# entity / redstone / hopper / tick load so creative builds cannot drag down the
+# shared main thread.
+#
+# scripts/luckperms/setup.sh appends this to the paper-world.yml Paper generated
+# for the world (survival/dimensions/minecraft/creative/paper-world.yml on 26.3),
+# keeping Paper's own `_version` line. Do not add `_version` here.
+# Keys checked against Paper 26.3 build 258 config/paper-world-defaults.yml.
+# Hopper transfer rate/amount and spawner nerfing are Spigot settings: see
+# config/patches/minecraft/spigot-creative.json (spigot.yml world-settings.creative).
+chunks:
+  auto-save-interval: 6000
+entities:
+  spawning:
+    spawn-limits:
+      ambient: 1
+      axolotls: 1
+      creature: 5
+      monster: 5
+      underground_water_creature: 1
+      water_ambient: 1
+      water_creature: 1
+misc:
+  redstone-implementation: ALTERNATE_CURRENT
+hopper:
+  disable-move-event: true
+  cooldown-when-full: true
+tick-rates:
+  container-update: 2
+  grass-spread: 4
+  mob-spawner: 4
