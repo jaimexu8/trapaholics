@@ -256,7 +256,7 @@ if (( DO_WORLD )); then
     echo "World 'creative' already exists"
   else
     log "Creating Multiverse world 'creative' (normal terrain; takes a while)"
-    rcon_ok "$MC_CONTAINER" mv create creative normal
+    rcon_ok "$MC_CONTAINER" mv create creative normal --seed 4354585255707245098
   fi
 
   log "Configuring creative world (gamemode creative, peaceful, no nether/end portals)"
